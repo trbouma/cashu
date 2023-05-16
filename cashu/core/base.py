@@ -10,6 +10,8 @@ from .crypto.keys import derive_keys, derive_keyset_id, derive_pubkeys
 from .crypto.secp import PrivateKey, PublicKey
 from .legacy import derive_keys_backwards_compatible_insecure_pre_0_12
 
+from datetime import datetime
+
 # ------- PROOFS -------
 
 
@@ -41,8 +43,8 @@ class Proof(BaseModel):
     send_id: Union[
         None, str
     ] = ""  # unique ID of send attempt, used for grouping pending tokens in the wallet
-    time_created: Union[None, str] = ""
-    time_reserved: Union[None, str] = ""
+    time_created: Union[None, str, int, float, datetime] = ""
+    time_reserved: Union[None, str, int, float, datetime] = ""
 
     def to_dict(self):
         # dictionary without the fields that don't need to be send to Carol
