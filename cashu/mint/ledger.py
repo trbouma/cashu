@@ -305,7 +305,7 @@ class Ledger:
             checking_id,
             payment_request,
             error_message,
-        ) = await self.lightning.create_invoice(amount, "Cashu deposit", description_hash)
+        ) = await self.lightning.create_invoice(amount, settings.mint_deposit_message, description_hash)
         logger.trace(
             f"_request_lightning_invoice: Lightning invoice: {description_hash}"
         )

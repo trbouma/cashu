@@ -8,7 +8,7 @@ from pydantic import BaseSettings, Extra, Field
 
 env = Env()
 
-VERSION = "0.12.0"
+VERSION = "0.12.0 postgres"
 
 
 def find_env_file():
@@ -70,6 +70,7 @@ class MintInformation(CashuSettings):
     mint_info_contact: List[List[str]] = Field(default=[["", ""]])
     mint_info_nuts: List[str] = Field(default=["NUT-07", "NUT-08", "NUT-09"])
     mint_info_motd: str = Field(default=None)
+    mint_deposit_message: str = Field(default="Cashu deposit")
 
 
 class WalletSettings(CashuSettings):
