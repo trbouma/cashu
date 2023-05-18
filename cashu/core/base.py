@@ -35,7 +35,7 @@ class Proof(BaseModel):
     ] = ""  # NOTE: None for backwards compatibility for old clients that do not include the keyset id < 0.3
     amount: int = 0
     secret: str = ""  # secret or message to be blinded and signed
-    C: str = ""  # signature on secret, unblinded by wallet
+    C: str = ""   # signature on secret, unblinded by wallet
     script: Union[P2SHScript, None] = None  # P2SH spending condition
     reserved: Union[
         None, bool

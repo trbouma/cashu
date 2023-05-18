@@ -115,6 +115,7 @@ class LedgerAPI:
         self, promises: List[BlindedSignature], secrets: List[str], rs: List[PrivateKey]
     ):
         """Returns proofs of promise from promises. Wants secrets and blinding factors rs."""
+        
         proofs: List[Proof] = []
         for promise, secret, r in zip(promises, secrets, rs):
             logger.trace(f"Creating proof with keyset {self.keyset_id} = {promise.id}")
@@ -332,8 +333,10 @@ class LedgerAPI:
         try:
             # backwards compatibility: parse promises < 0.8.0 with no "promises" field
             promises = PostMintResponseLegacy.parse_obj(reponse_dict).__root__
+            print("legacy promise", promises)
         except:
             promises = PostMintResponse.parse_obj(reponse_dict).promises
+            print("regular promise", promises)
 
         return self._construct_proofs(promises, secrets, rs)
 

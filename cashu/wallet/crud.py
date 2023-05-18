@@ -42,7 +42,7 @@ async def get_proofs(
                                 time_created    =   each[6],
                                 time_reserved   =   each[7]                               
                                 )
-        print("proof_compat", proof_compat)
+        # print("proof_compat", proof_compat)
         Proofs.append(proof_compat) 
     # return [Proof(**dict(r)) for r in rows]
     return Proofs
