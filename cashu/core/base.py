@@ -10,6 +10,8 @@ from .crypto.keys import derive_keys, derive_keyset_id, derive_pubkeys
 from .crypto.secp import PrivateKey, PublicKey
 from .legacy import derive_keys_backwards_compatible_insecure_pre_0_12
 
+from datetime import datetime
+
 # ------- PROOFS -------
 
 
@@ -33,7 +35,7 @@ class Proof(BaseModel):
     ] = ""  # NOTE: None for backwards compatibility for old clients that do not include the keyset id < 0.3
     amount: int = 0
     secret: str = ""  # secret or message to be blinded and signed
-    C: str = ""  # signature on secret, unblinded by wallet
+    C: str = ""   # signature on secret, unblinded by wallet
     script: Union[P2SHScript, None] = None  # P2SH spending condition
     reserved: Union[
         None, bool
@@ -41,8 +43,8 @@ class Proof(BaseModel):
     send_id: Union[
         None, str
     ] = ""  # unique ID of send attempt, used for grouping pending tokens in the wallet
-    time_created: Union[None, str] = ""
-    time_reserved: Union[None, str] = ""
+    time_created: Union[None, str, int, float, datetime] = ""
+    time_reserved: Union[None, str, int, float, datetime] = ""
 
     def to_dict(self):
         # dictionary without the fields that don't need to be send to Carol
@@ -406,8 +408,11 @@ class TokenV3(BaseModel):
         assert tokenv3_serialized.startswith(prefix), Exception(
             f"Token prefix not valid. Expected {prefix}."
         )
+        # print('line 411', "test")
         token_base64 = tokenv3_serialized[len(prefix) :]
+        print('413', token_base64)
         token = json.loads(base64.urlsafe_b64decode(token_base64))
+        print(token)
         return cls.parse_obj(token)
 
     def serialize(self):
