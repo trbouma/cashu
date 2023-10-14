@@ -90,14 +90,14 @@ async def keysets() -> KeysetsResponse:
 
 
 @router.get("/mint", name="Request mint", summary="Request minting of new tokens")
-async def request_mint(amount: int = 0, description_hash: Optional[bytes] = None) -> Union[GetMintResponse, CashuError]:
+async def request_mint(amount: int = 0, description_hash: Optional[bytes] = None, description: str="no description") -> Union[GetMintResponse, CashuError]:
     """
     Request minting of new tokens. The mint responds with a Lightning invoice.
     This endpoint can be used for a Lightning invoice UX flow.
 
     Call `POST /mint` after paying the invoice.
     """
-    payment_request, hash = await ledger.request_mint(amount, description_hash)
+    payment_request, hash = await ledger.request_mint(amount, description_hash=description_hash, description=description)
     print(f"Lightning invoice: {payment_request}")
     resp = GetMintResponse(pr=payment_request, hash=hash)
     return resp
