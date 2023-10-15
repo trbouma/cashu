@@ -4,6 +4,8 @@ __pycache__/
 *$py.class
 
 cashu-alpha
+cashu-old
+
 
 # C extensions
 *.so
