@@ -27,10 +27,25 @@ async def get_proofs(
 ):
     rows = await (conn or db).fetchall(
         """
-        SELECT * from proofs
+        SELECT id,amount,c,secret,reserved,send_id,time_created,time_reserved from proofs
         """
-    )
-    return [Proof(**dict(r)) for r in rows]
+    )   
+    Proofs = []
+    for each in rows:
+        
+        proof_compat = Proof(   id              =   each[0], 
+                                amount          =   each[1],
+                                C               =   each[2],
+                                secret          =   each[3],                                
+                                reserved        =   each[4],
+                                send_id         =   each[5],
+                                time_created    =   each[6],
+                                time_reserved   =   each[7]                               
+                                )
+        # print("proof_compat", proof_compat)
+        Proofs.append(proof_compat) 
+    # return [Proof(**dict(r)) for r in rows]
+    return Proofs
 
 
 async def get_reserved_proofs(
@@ -65,7 +80,7 @@ async def invalidate_proof(
           (amount, C, secret, time_used, id)
         VALUES (?, ?, ?, ?, ?)
         """,
-        (proof.amount, str(proof.C), str(proof.secret), int(time.time()), proof.id),
+        (proof.amount, str(proof.C), str(proof.secret), datetime.fromtimestamp(time.time()), proof.id),
     )
 
 
@@ -88,7 +103,7 @@ async def update_proof_reserved(
     if reserved:
         # set the time of reserving
         clauses.append("time_reserved = ?")
-        values.append(int(time.time()))
+        values.append(datetime.fromtimestamp(time.time()))
 
     await (conn or db).execute(  # type: ignore
         f"UPDATE proofs SET {', '.join(clauses)} WHERE secret = ?",
@@ -138,8 +153,8 @@ async def get_unused_locks(
 ):
     clause: List[str] = []
     args: List[str] = []
-
-    clause.append("used = 0")
+    
+    clause.append("used = false")
 
     if address:
         clause.append("address = ?")
@@ -156,6 +171,7 @@ async def get_unused_locks(
         """,
         tuple(args),
     )
+    
     return [P2SHScript(**r) for r in rows]
 
 
@@ -318,7 +334,7 @@ async def update_lightning_invoice(
 
     if time_paid:
         clauses.append("time_paid = ?")
-        values.append(time_paid)
+        values.append(datetime.fromtimestamp(time_paid))
 
     await (conn or db).execute(
         f"UPDATE invoices SET {', '.join(clauses)} WHERE hash = ?",
