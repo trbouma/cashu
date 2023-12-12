@@ -3,6 +3,7 @@ import json
 import math
 import secrets as scrts
 import time
+from datetime import datetime
 import uuid
 from itertools import groupby
 from typing import Dict, List, Optional
@@ -114,6 +115,7 @@ class LedgerAPI:
         self, promises: List[BlindedSignature], secrets: List[str], rs: List[PrivateKey]
     ):
         """Returns proofs of promise from promises. Wants secrets and blinding factors rs."""
+        
         proofs: List[Proof] = []
         for promise, secret, r in zip(promises, secrets, rs):
             logger.trace(f"Creating proof with keyset {self.keyset_id} = {promise.id}")
@@ -301,12 +303,12 @@ class LedgerAPI:
         return keysets.keysets
 
     @async_set_requests
-    async def request_mint(self, amount, description_hash: Optional[bytes] = None):
+    async def request_mint(self, amount, description_hash: Optional[bytes] = None, description: str = "no description3"):
         """Requests a mint from the server and returns Lightning invoice."""
         if description_hash != None:
             description_hash = description_hash.decode("utf-8")
 
-        resp = self.s.get(self.url + "/mint", params={"amount": amount, "description_hash": description_hash})
+        resp = self.s.get(self.url + "/mint", params={"amount": amount, "description_hash": description_hash, "description": description})
         resp.raise_for_status()
         return_dict = resp.json()
         self.raise_on_error(return_dict)
@@ -331,8 +333,10 @@ class LedgerAPI:
         try:
             # backwards compatibility: parse promises < 0.8.0 with no "promises" field
             promises = PostMintResponseLegacy.parse_obj(reponse_dict).__root__
+            print("legacy promise", promises)
         except:
             promises = PostMintResponse.parse_obj(reponse_dict).promises
+            print("regular promise", promises)
 
         return self._construct_proofs(promises, secrets, rs)
 
@@ -492,8 +496,8 @@ class Wallet(LedgerAPI):
     async def load_proofs(self):
         self.proofs = await get_proofs(db=self.db)
 
-    async def request_mint(self, amount, description_hash: Optional[bytes] = None):
-        invoice = await super().request_mint(amount,description_hash)
+    async def request_mint(self, amount, description_hash: Optional[bytes] = None, description: str = "no description4"):
+        invoice = await super().request_mint(amount,description_hash, description=description)
         invoice.time_created = int(time.time())
         await store_lightning_invoice(db=self.db, invoice=invoice)
         return invoice
