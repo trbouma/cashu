@@ -145,7 +145,6 @@ async def store_p2sh(
         ),
     )
 
-
 async def get_unused_locks(
     address: str = "",
     db: Optional[Database] = None,
