@@ -321,14 +321,11 @@ async def update_lightning_invoice(
     if preimage:
         clauses.append("preimage = ?")
         values.append(preimage)
+    
+    update_clause = f"UPDATE invoices SET paid=true WHERE id = '{id}'"
 
-    await (conn or db).execute(
-        f"UPDATE invoices SET {', '.join(clauses)} WHERE id = ?",
-        (
-            *values,
-            id,
-        ),
-    )
+    await (conn or db).execute(update_clause)
+   
 
 
 async def bump_secret_derivation(
