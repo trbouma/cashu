@@ -1,4 +1,5 @@
 import time
+from datetime import datetime
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional
 
@@ -348,8 +349,8 @@ class LedgerCrudSqlite(LedgerCrud):
                 quote.amount,
                 quote.issued,
                 quote.paid,
-                quote.created_time,
-                quote.paid_time,
+                datetime.fromtimestamp(quote.created_time),
+                datetime.fromtimestamp(quote.paid_time),
             ),
         )
 
@@ -367,7 +368,13 @@ class LedgerCrudSqlite(LedgerCrud):
             """,
             (quote_id,),
         )
-        return MintQuote(**dict(row)) if row else None
+        print("get mint quote", row)
+        list_row = list(row)
+        list_row[8] = int(datetime.strptime(row[8], '%Y-%m-%d %H:%M:%S').timestamp())
+        list_row[9] = int(datetime.strptime(row[8], '%Y-%m-%d %H:%M:%S').timestamp())
+        mod_row = tuple(list_row)
+        print("mod_row", mod_row)
+        return MintQuote(**dict(mod_row)) if mod_row else None
 
     async def get_mint_quote_by_checking_id(
         self,
@@ -398,7 +405,7 @@ class LedgerCrudSqlite(LedgerCrud):
             (
                 quote.issued,
                 quote.paid,
-                quote.paid_time,
+                datetime.fromtimestamp(time.time()),
                 quote.quote,
             ),
         )
@@ -443,7 +450,7 @@ class LedgerCrudSqlite(LedgerCrud):
                 quote.fee_reserve or 0,
                 quote.paid,
                 quote.created_time,
-                quote.paid_time,
+                datetime.fromtimestamp(time.time()),
                 quote.fee_paid,
                 quote.proof,
             ),
@@ -509,6 +516,17 @@ class LedgerCrudSqlite(LedgerCrud):
         keyset: MintKeyset,
         conn: Optional[Connection] = None,
     ) -> None:
+        print("we are in store keyset", db.type)
+        if db.type == "SQLITE":
+            print("we are in sqlite")
+            arg_valid_from  = keyset.valid_from or int(time.time())
+            arg_valid_to    = keyset.valid_to or int(time.time())
+            arg_first_seen  = keyset.first_seen or int(time.time())
+        elif db.type == 'POSTGRES':
+            arg_valid_from  = datetime.fromtimestamp(time.time())
+            arg_valid_to    = datetime.fromtimestamp(time.time())
+            arg_first_seen  = datetime.fromtimestamp(time.time())
+            
         await (conn or db).execute(  # type: ignore
             f"""
             INSERT INTO {table_with_schema(db, 'keysets')}
@@ -519,9 +537,9 @@ class LedgerCrudSqlite(LedgerCrud):
                 keyset.id,
                 keyset.seed,
                 keyset.derivation_path,
-                keyset.valid_from or int(time.time()),
-                keyset.valid_to or int(time.time()),
-                keyset.first_seen or int(time.time()),
+                arg_valid_from,
+                arg_valid_to,
+                arg_first_seen,
                 True,
                 keyset.version,
                 keyset.unit.name,

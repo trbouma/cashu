@@ -1,5 +1,5 @@
 import json
-import time
+import time, datetime
 from typing import Any, List, Optional, Tuple
 
 from ..core.base import Invoice, Proof, WalletKeyset
@@ -173,9 +173,9 @@ async def store_keyset(
         (
             keyset.id,
             mint_url or keyset.mint_url,
-            keyset.valid_from or int(time.time()),
-            keyset.valid_to or int(time.time()),
-            keyset.first_seen or int(time.time()),
+            datetime.fromtimestamp(keyset.valid_from) or datetime.fromtimestamp(time.time()),
+            datetime.fromtimestamp(keyset.valid_to) or datetime.fromtimestamp(time.time()),
+            datetime.fromtimestamp(keyset.first_seen) or datetime.fromtimestamp(time.time()),
             keyset.active,
             keyset.serialize(),
             keyset.unit.name,

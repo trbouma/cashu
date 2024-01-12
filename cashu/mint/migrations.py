@@ -1,4 +1,5 @@
-import time
+import time 
+from datetime import datetime
 
 from ..core.db import Connection, Database, table_with_schema
 from ..core.settings import settings
@@ -234,7 +235,7 @@ async def m011_add_quote_tables(db: Database):
             )
             await conn.execute(
                 f"UPDATE {table_with_schema(db, table)} SET created ="
-                f" '{int(time.time())}'"
+                f" '{datetime.fromtimestamp(time.time())}'"
             )
 
         # add column "witness" to table proofs_used
@@ -295,12 +296,18 @@ async def m011_add_quote_tables(db: Database):
                 );
             """)
 
-        await conn.execute(
-            f"INSERT INTO {table_with_schema(db, 'mint_quotes')} (quote, method,"
-            " request, checking_id, unit, amount, paid, issued, created_time,"
-            " paid_time) SELECT id, 'bolt11', bolt11, payment_hash, 'sat', amount,"
-            f" False, issued, created, 0 FROM {table_with_schema(db, 'invoices')} "
-        )
+        if db.type == 'SQLITE':
+            await conn.execute(
+                f"INSERT INTO {table_with_schema(db, 'mint_quotes')} (quote, method,"
+                " request, checking_id, unit, amount, paid, issued, created_time,"
+                " paid_time) SELECT id, 'bolt11', bolt11, payment_hash, 'sat', amount,"
+                f" False, issued, created, 0 FROM {table_with_schema(db, 'invoices')} "
+            )
 
-        # drop table invoices
-        await conn.execute(f"DROP TABLE {table_with_schema(db, 'invoices')}")
+            # drop table invoices
+            await conn.execute(f"DROP TABLE {table_with_schema(db, 'invoices')}")
+        elif db.type == 'POSTGRES':
+            #TODO THE POSTGRES THING
+            
+            pass
+
