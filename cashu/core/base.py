@@ -5,9 +5,11 @@ from dataclasses import dataclass
 from enum import Enum
 from sqlite3 import Row
 from typing import Any, Dict, List, Optional, Union
+from datetime import datetime
 
 from loguru import logger
 from pydantic import BaseModel, Field
+from datetime import datetime
 
 from .crypto.keys import (
     derive_keys,
@@ -95,8 +97,8 @@ class Proof(BaseModel):
     reserved: Union[None, bool] = False
     # unique ID of send attempt, used for grouping pending tokens in the wallet
     send_id: Union[None, str] = ""
-    time_created: Union[None, str] = ""
-    time_reserved: Union[None, str] = ""
+    time_created: Union[None, datetime, str] = ""
+    time_reserved: Union[None, datetime, str] = ""
     derivation_path: Union[None, str] = ""  # derivation path of the proof
     mint_id: Union[None, str] = (
         None  # holds the id of the mint operation that created this proof
@@ -205,8 +207,8 @@ class Invoice(BaseModel):
     preimage: Union[str, None] = None
     issued: Union[None, bool] = False
     paid: Union[None, bool] = False
-    time_created: Union[None, str, int, float] = ""
-    time_paid: Union[None, str, int, float] = ""
+    time_created: Union[None, datetime, str, int, float] = None
+    time_paid: Union[None, datetime, str, int, float] = None
 
 
 class MeltQuote(BaseModel):
@@ -233,8 +235,8 @@ class MintQuote(BaseModel):
     amount: int
     paid: bool
     issued: bool
-    created_time: int = 0
-    paid_time: int = 0
+    created_time: datetime 
+    paid_time: datetime = datetime(2023, 1, 12, 14, 30)
     expiry: int = 0
 
 
@@ -552,9 +554,9 @@ class WalletKeyset:
     unit: Unit
     public_keys: Dict[int, PublicKey]
     mint_url: Union[str, None] = None
-    valid_from: Union[str, None] = None
-    valid_to: Union[str, None] = None
-    first_seen: Union[str, None] = None
+    valid_from: Union[str, datetime, None] = None
+    valid_to: Union[str, datetime, None] = None
+    first_seen: Union[str, datetime, None] = None
     active: Union[bool, None] = True
 
     def __init__(
@@ -563,9 +565,9 @@ class WalletKeyset:
         unit: str,
         id: Optional[str] = None,
         mint_url=None,
-        valid_from=None,
-        valid_to=None,
-        first_seen=None,
+        valid_from=datetime(23,12,31,12,00),
+        valid_to=datetime(23,12,31,12,00),
+        first_seen=datetime(23,12,31,12,00),
         active=True,
         use_deprecated_id=False,  # BACKWARDS COMPATIBILITY < 0.15.0
     ):
@@ -642,9 +644,9 @@ class MintKeyset:
     derivation_path: str
     seed: Optional[str] = None
     public_keys: Union[Dict[int, PublicKey], None] = None
-    valid_from: Union[str, None] = None
-    valid_to: Union[str, None] = None
-    first_seen: Union[str, None] = None
+    valid_from: Union[str, datetime, None] = None
+    valid_to: Union[str, datetime, None] = None
+    first_seen: Union[str, datetime, None] = None
     version: Union[str, None] = None
 
     duplicate_keyset_id: Optional[str] = None  # BACKWARDS COMPATIBILITY < 0.15.0

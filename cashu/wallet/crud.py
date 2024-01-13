@@ -1,6 +1,7 @@
 import json
-import time, datetime
+import time
 from typing import Any, List, Optional, Tuple
+from datetime import datetime
 
 from ..core.base import Invoice, Proof, WalletKeyset
 from ..core.db import Connection, Database
@@ -11,24 +12,44 @@ async def store_proof(
     db: Database,
     conn: Optional[Connection] = None,
 ) -> None:
-    await (conn or db).execute(
-        """
-        INSERT INTO proofs
-          (id, amount, C, secret, time_created, derivation_path, dleq, mint_id, melt_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            proof.id,
-            proof.amount,
-            str(proof.C),
-            str(proof.secret),
-            int(time.time()),
-            proof.derivation_path,
-            json.dumps(proof.dleq.dict()) if proof.dleq else "",
-            proof.mint_id,
-            proof.melt_id,
-        ),
-    )
+    if db.type == "POSTGRES":
+        await (conn or db).execute(
+            """
+            INSERT INTO proofs
+            (id, amount, C, secret, time_created, derivation_path, dleq, mint_id, melt_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                proof.id,
+                proof.amount,
+                str(proof.C),
+                str(proof.secret),
+                datetime.fromtimestamp(time.time()),
+                proof.derivation_path,
+                json.dumps(proof.dleq.dict()) if proof.dleq else "",
+                proof.mint_id,
+                proof.melt_id,
+            ),
+        )
+    else:
+        await (conn or db).execute(
+            """
+            INSERT INTO proofs
+            (id, amount, C, secret, time_created, derivation_path, dleq, mint_id, melt_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                proof.id,
+                proof.amount,
+                str(proof.C),
+                str(proof.secret),
+                int(time.time()),
+                proof.derivation_path,
+                json.dumps(proof.dleq.dict()) if proof.dleq else "",
+                proof.mint_id,
+                proof.melt_id,
+            ),
+        )
 
 
 async def get_proofs(
@@ -97,7 +118,7 @@ async def invalidate_proof(
             proof.amount,
             str(proof.C),
             str(proof.secret),
-            int(time.time()),
+            time.time(),
             proof.id,
             proof.derivation_path,
             proof.mint_id,
@@ -173,9 +194,9 @@ async def store_keyset(
         (
             keyset.id,
             mint_url or keyset.mint_url,
-            datetime.fromtimestamp(keyset.valid_from) or datetime.fromtimestamp(time.time()),
-            datetime.fromtimestamp(keyset.valid_to) or datetime.fromtimestamp(time.time()),
-            datetime.fromtimestamp(keyset.first_seen) or datetime.fromtimestamp(time.time()),
+            keyset.valid_from,
+            keyset.valid_to,
+            keyset.first_seen,
             keyset.active,
             keyset.serialize(),
             keyset.unit.name,

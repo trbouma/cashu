@@ -49,7 +49,7 @@ from ..lightning.base import (
     PaymentQuoteResponse,
     PaymentStatus,
 )
-from ..mint.crud import LedgerCrudSqlite
+from ..mint.crud import LedgerCrudSqlite, LedgerCrudPostgres
 from .conditions import LedgerSpendingConditions
 from .verification import LedgerVerification
 

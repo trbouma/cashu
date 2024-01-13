@@ -11,7 +11,7 @@ from ..core.db import Database
 from ..core.migrations import migrate_databases
 from ..core.settings import settings
 from ..mint import migrations
-from ..mint.crud import LedgerCrudSqlite
+from ..mint.crud import LedgerCrudSqlite, LedgerCrudPostgres
 from ..mint.ledger import Ledger
 
 logger.debug("Enviroment Settings:")
@@ -36,12 +36,17 @@ assert settings.mint_private_key is not None, "No mint private key set."
 backends = {
     Method.bolt11: {Unit.sat: lightning_backend},
 }
+
+# Determine database
+db = Database("mint", settings.mint_database)
+crud = LedgerCrudPostgres() if db.type == "POSTGRES" else LedgerCrudSqlite()
+
 ledger = Ledger(
-    db=Database("mint", settings.mint_database),
+    db=db,
     seed=settings.mint_private_key,
     derivation_path=settings.mint_derivation_path,
     backends=backends,
-    crud=LedgerCrudSqlite(),
+    crud=crud 
 )
 
 

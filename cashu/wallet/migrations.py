@@ -1,6 +1,6 @@
 from ..core.db import Connection, Database
 
-
+print("wallet migrations")
 async def m000_create_migrations_table(conn: Connection):
     await conn.execute("""
     CREATE TABLE IF NOT EXISTS dbversions (
@@ -35,21 +35,21 @@ async def m001_initial(db: Database):
             """)
 
         await conn.execute("""
-            CREATE VIEW IF NOT EXISTS balance AS
+            CREATE VIEW  balance AS
             SELECT COALESCE(SUM(s), 0) AS balance FROM (
                 SELECT SUM(amount) AS s
                 FROM proofs
                 WHERE amount > 0
-            );
+            ) AS s;
         """)
 
         await conn.execute("""
-            CREATE VIEW IF NOT EXISTS balance_used AS
+            CREATE VIEW balance_used AS
             SELECT COALESCE(SUM(s), 0) AS used FROM (
                 SELECT SUM(amount) AS s
                 FROM proofs_used
                 WHERE amount > 0
-            );
+            ) AS s;
         """)
 
 
