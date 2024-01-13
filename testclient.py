@@ -20,7 +20,7 @@ mint = "http://127.0.0.1:3338"
 # mint = "https://8333.space:8333"
 # mint = "https://testnut.cashu.space"
 
-# wallet_db = 'postgres://postgres:password@beelink:6432/testwallet'
+
 wallet_db = 'sqlite:///data/wallet.sqlite3.db'
 amount = 1
 description = 'test'
