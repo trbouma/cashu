@@ -224,7 +224,7 @@ class LedgerCrudSqlite(LedgerCrud):
                 e,
                 s,
                 id,
-                int(time.time()),
+                datetime.fromtimestamp(time.time()),
             ),
         )
 
@@ -640,7 +640,7 @@ class LedgerCrudPostgres(LedgerCrud):
                     e,
                     s,
                     id,
-                    int(time.time()),
+                    datetime.fromtimestamp(time.time()),
                 ),
             )
         elif db.type == "POSTGRES":
@@ -709,7 +709,7 @@ class LedgerCrudPostgres(LedgerCrud):
                 proof.secret,
                 proof.id,
                 proof.witness,
-                int(time.time()),
+                datetime.fromtimestamp(time.time()),
             ),
         )
 
@@ -720,7 +720,8 @@ class LedgerCrudPostgres(LedgerCrud):
         conn: Optional[Connection] = None,
     ) -> List[Proof]:
         rows = await (conn or db).fetchall(f"""
-            SELECT * from {table_with_schema(db, 'proofs_pending')}
+            SELECT amount, c, secret, id, created 
+                    from {table_with_schema(db, 'proofs_pending')}
             """)
         return [Proof(**r) for r in rows]
 
@@ -742,7 +743,7 @@ class LedgerCrudPostgres(LedgerCrud):
                 proof.amount,
                 str(proof.C),
                 str(proof.secret),
-                int(time.time()),
+                datetime.fromtimestamp(time.time()),
             ),
         )
 
@@ -784,7 +785,7 @@ class LedgerCrudPostgres(LedgerCrud):
                 quote.issued,
                 quote.paid,
                 quote.created_time,
-                quote.paid_time,
+                datetime.fromtimestamp(time.time()),
             ),
         )
 
@@ -879,7 +880,7 @@ class LedgerCrudPostgres(LedgerCrud):
                 quote.amount,
                 quote.fee_reserve or 0,
                 quote.paid,
-                quote.created_time,
+                datetime.fromtimestamp(time.time()),
                 datetime.fromtimestamp(time.time()),
                 quote.fee_paid,
                 quote.proof,
@@ -918,7 +919,23 @@ class LedgerCrudPostgres(LedgerCrud):
         )
         if row is None:
             return None
-        return MeltQuote(**dict(row)) if row else None
+        
+        melt_quote = MeltQuote( quote=row[0],
+                                method=row[1],
+                                request=row[2],
+                                checking_id=row[3],
+                                unit=row[4],
+                                amount=row[5],
+                                fee_reserve=row[6],
+                                paid=row[7],
+                                created_time=datetime.fromtimestamp(time.time()),
+                                paid_time=datetime.fromtimestamp(time.time()),
+                                fee_paid=row[10],
+                                proof=row [11]
+                               
+                               )
+        return melt_quote
+        # return MeltQuote(**dict(row)) if row else None
 
     async def update_melt_quote(
         self,
@@ -933,7 +950,7 @@ class LedgerCrudPostgres(LedgerCrud):
             (
                 quote.paid,
                 quote.fee_paid,
-                quote.paid_time,
+                datetime.fromtimestamp(time.time()),
                 quote.proof,
                 quote.quote,
             ),

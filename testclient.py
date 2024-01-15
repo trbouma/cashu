@@ -2,10 +2,13 @@ from importlib import reload
 from cashu.wallet.wallet import Wallet as Wallet
 from cashu.wallet.cli.cli_helpers import get_mint_wallet, print_mint_balances, verify_mint
 import asyncio
-
+from dotenv import load_dotenv
+import os
+from cashu.core.base import Proof, DLEQWallet
 from cashu.core.migrations import migrate_databases
 from cashu.wallet import migrations
-
+import datetime
+from cashu.core.base import TokenV1, TokenV2, TokenV3, TokenV3Token
 
 from cashu.wallet.helpers import (
     deserialize_token_from_string,
@@ -15,26 +18,32 @@ from cashu.wallet.helpers import (
     send,
 )
 
-# mint = "https://mint.asats.io"
-mint = "http://127.0.0.1:3338"
-# mint = "https://8333.space:8333"
-# mint = "https://testnut.cashu.space"
 
 
-wallet_db = 'sqlite:///data/wallet.sqlite3.db'
-amount = 1
+load_dotenv()
+
+
+
+
+mint = os.getenv('TESTCLIENT_MINT')
+wallet_db = os.getenv('TESTCLIENT_WALLET_DB')
+print(wallet_db, mint)
+amount = 200
 description = 'test'
 
-wallet = Wallet(mint, wallet_db)
-asyncio.run(migrate_databases(wallet.db, migrations))
-# asyncio.run(wallet._init_private_key())
-# asyncio.run(wallet.load_proofs())
-# asyncio.run(wallet.load_mint())
+
 
 
 mode = input("enter mode:")
 
-if mode =="i":
+wallet = Wallet(mint, wallet_db)
+asyncio.run(migrate_databases(wallet.db, migrations))
+asyncio.run(wallet._init_private_key())
+asyncio.run(wallet.load_proofs())
+asyncio.run(wallet.load_mint())
+
+if mode =="invoice receive":
+    amount = int(input("what is the amount to receive? "))
     invoice = asyncio.run(wallet.request_mint(amount))
     print("invoice:", invoice.bolt11 )
     print("----")
@@ -55,10 +64,55 @@ elif mode =="p":
     print(wallet.balance)
     # print(wallet.keyset_id)
 
-elif mode == "b":
-    print("balance:", wallet.balance_per_keyset())
-    print(wallet.balance)
+elif mode =="invoice send":
+    ln = input("what is the lightning invoice to send to? ")
+  
+    quote = asyncio.run(wallet.get_pay_amount_with_fees(ln))
+    print("quote: ", quote.quote, quote.amount, quote.fee_reserve, quote.paid)
+    total_amount = quote.amount + quote.fee_reserve
+    print("total amount:", total_amount)
+    print(wallet.proofs)
+    _, send_proofs = asyncio.run(wallet.split_to_send(wallet.proofs, total_amount))
+    # print("send_proofs:", send_proofs)
+    try:
+       melt_response = asyncio.run(wallet.pay_lightning(
+           send_proofs, ln, quote.fee_reserve, quote.quote
+       ))
+    except Exception as e:
+        print(f" Error paying invoice: {str(e)}")
+       
+    print(" Invoice paid!")
 
+elif mode == "balance":
+    print("balance:", wallet.balance_per_keyset())
+    print(wallet.balance, wallet.available_balance )
+    balance_per_mint = asyncio.run(wallet.balance_per_minturl())
+    print(balance_per_mint)
+    # print(wallet.proofs)
+elif mode == 'secrets':
+    print(wallet.mnemonic)
+    print(asyncio.run(wallet.generate_n_secrets(5))[0])    
+
+elif mode == "cashu send":
+    cashu_amount = int(input("what is the cashu token amount?"))
+    _, send_proofs = asyncio.run(wallet.split_to_send(wallet.proofs, cashu_amount))
+    token = asyncio.run(wallet.serialize_proofs(
+        send_proofs,
+        include_mints=True,
+        include_dleq=True,
+    ))
+    print(token)
+elif mode == "cashu receive":
+    tokenObj : TokenV3
+    cashu_token = input("what is the cashu token? ")
+    tokenObj = deserialize_token_from_string(cashu_token)
+    print(tokenObj)
+    asyncio.run(receive(tokenObj=tokenObj, wallet=wallet))
+    
+
+    
+
+    
 
     
 

@@ -2,6 +2,7 @@ import base64
 import copy
 import json
 import time
+from datetime import datetime
 import uuid
 from itertools import groupby
 from posixpath import join
@@ -472,7 +473,7 @@ class LedgerAPI(LedgerAPIDeprecated, object):
             payment_hash=decoded_invoice.payment_hash,
             id=mint_response.quote,
             out=False,
-            time_created=int(time.time()),
+            time_created=datetime.fromtimestamp(time.time()),
         )
 
     @async_set_httpx_client
@@ -782,7 +783,7 @@ class Wallet(LedgerAPI, WalletP2PK, WalletHTLC, WalletSecrets):
         self, reload: bool = False, unit: Union[Unit, bool] = True
     ) -> None:
         """Load all proofs from the database."""
-
+        print("load proofs")
         if self.proofs and not reload:
             logger.debug("Proofs already loaded.")
             return
@@ -870,7 +871,7 @@ class Wallet(LedgerAPI, WalletP2PK, WalletHTLC, WalletSecrets):
 
         if id:
             await update_lightning_invoice(
-                db=self.db, id=id, paid=True, time_paid=int(time.time())
+                db=self.db, id=id, paid=True, time_paid=datetime.fromtimestamp(time.time())
             )
             # store the mint_id in proofs
             async with self.db.connect() as conn:
@@ -1014,7 +1015,7 @@ class Wallet(LedgerAPI, WalletP2PK, WalletHTLC, WalletSecrets):
             payment_hash=decoded_invoice.payment_hash,
             # preimage=status.preimage,
             paid=False,
-            time_paid=int(time.time()),
+            time_paid=datetime.fromtimestamp(time.time()),
             id=quote_id,  # store the same ID in the invoice
             out=True,  # outgoing invoice
         )
@@ -1041,7 +1042,7 @@ class Wallet(LedgerAPI, WalletP2PK, WalletHTLC, WalletSecrets):
             db=self.db,
             id=quote_id,
             paid=True,
-            time_paid=int(time.time()),
+            time_paid=datetime.fromtimestamp(time.time()),
             preimage=status.payment_preimage,
         )
 
@@ -1523,10 +1524,11 @@ class Wallet(LedgerAPI, WalletP2PK, WalletHTLC, WalletSecrets):
         Returns:
             Tuple[List[Proof], List[Proof]]: Tuple of proofs to keep and proofs to send
         """
+        
         if secret_lock:
             logger.debug(f"Spending conditions: {secret_lock}")
         spendable_proofs = await self._select_proofs_to_send(proofs, amount)
-
+        
         keep_proofs, send_proofs = await self.split(
             spendable_proofs, amount, secret_lock
         )

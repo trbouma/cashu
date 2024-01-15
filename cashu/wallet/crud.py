@@ -3,7 +3,7 @@ import time
 from typing import Any, List, Optional, Tuple
 from datetime import datetime
 
-from ..core.base import Invoice, Proof, WalletKeyset
+from ..core.base import Invoice, Proof, WalletKeyset, DLEQ, DLEQWallet
 from ..core.db import Connection, Database
 
 
@@ -43,7 +43,7 @@ async def store_proof(
                 proof.amount,
                 str(proof.C),
                 str(proof.secret),
-                int(time.time()),
+                datetime.fromtimestamp(time.time()),
                 proof.derivation_path,
                 json.dumps(proof.dleq.dict()) if proof.dleq else "",
                 proof.mint_id,
@@ -118,7 +118,7 @@ async def invalidate_proof(
             proof.amount,
             str(proof.C),
             str(proof.secret),
-            time.time(),
+            datetime.fromtimestamp(time.time()),
             proof.id,
             proof.derivation_path,
             proof.mint_id,
@@ -148,7 +148,7 @@ async def update_proof(
 
     if reserved is not None:
         clauses.append("time_reserved = ?")
-        values.append(int(time.time()))
+        values.append(datetime.fromtimestamp(time.time()))
 
     if mint_id is not None:
         clauses.append("mint_id = ?")

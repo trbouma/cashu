@@ -114,6 +114,9 @@ class Proof(BaseModel):
         else:
             # overwrite the empty string with None
             proof_dict["dleq"] = None
+        if proof_dict.get("c"):
+            proof_dict["C"]=proof_dict.get("c")            
+        
         c = cls(**proof_dict)
         return c
 
@@ -220,8 +223,8 @@ class MeltQuote(BaseModel):
     amount: int
     fee_reserve: int
     paid: bool
-    created_time: int = 0
-    paid_time: int = 0
+    created_time: datetime
+    paid_time: datetime
     fee_paid: int = 0
     proof: str = ""
 

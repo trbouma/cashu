@@ -3,6 +3,7 @@ import copy
 import math
 import time
 from typing import Dict, List, Mapping, Optional, Tuple
+from datetime import datetime
 
 import bolt11
 from loguru import logger
@@ -333,7 +334,7 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
             amount=quote_request.amount,
             issued=False,
             paid=False,
-            created_time=int(time.time()),
+            created_time=datetime.fromtimestamp(time.time()),
             expiry=invoice_obj.expiry or 0,
         )
         await self.crud.store_mint_quote(
@@ -410,7 +411,7 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
                 quote.amount == sum_amount_outputs
             ), "amount to mint does not match quote amount"
             if quote.expiry:
-                assert quote.expiry > int(time.time()), "quote expired"
+                assert quote.expiry > datetime.fromtimestamp(time.time()), "quote expired"
 
             promises = await self._generate_promises(outputs)
             logger.trace("generated promises")
@@ -485,8 +486,9 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
             unit=melt_quote.unit,
             amount=payment_quote.amount.to(unit).amount,
             paid=False,
-            fee_reserve=payment_quote.fee.to(unit).amount,
-            created_time=int(time.time()),
+            fee_reserve=payment_quote.fee.amount,
+            created_time=datetime.fromtimestamp(time.time()),
+            paid_time=datetime.fromtimestamp(time.time())
         )
         await self.crud.store_melt_quote(quote=quote, db=self.db)
         return PostMeltQuoteResponse(
@@ -539,7 +541,9 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
                     melt_quote.fee_paid = status.fee.to(unit).amount
                 if status.preimage:
                     melt_quote.proof = status.preimage
-                melt_quote.paid_time = int(time.time())
+
+                
+                melt_quote.paid_time = datetime.fromtimestamp(time.time())
                 await self.crud.update_melt_quote(quote=melt_quote, db=self.db)
 
         return melt_quote
@@ -589,7 +593,7 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
         # we handle this transaction internally
         melt_quote.fee_paid = 0
         melt_quote.paid = True
-        melt_quote.paid_time = int(time.time())
+        melt_quote.paid_time = datetime.fromtimestamp(time.time())
         await self.crud.update_melt_quote(quote=melt_quote, db=self.db)
 
         mint_quote.paid = True
@@ -675,7 +679,7 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
                     melt_quote.proof = payment.preimage
                 # set quote as paid
                 melt_quote.paid = True
-                melt_quote.paid_time = int(time.time())
+                melt_quote.paid_time = datetime.fromtimestamp(time.time())
                 await self.crud.update_melt_quote(quote=melt_quote, db=self.db)
 
             # melt successful, invalidate proofs
