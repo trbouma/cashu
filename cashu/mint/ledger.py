@@ -312,7 +312,7 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
         logger.trace(f"requesting invoice for {unit.str(quote_request.amount)}")
         invoice_response: InvoiceResponse = await self.backends[method][
             unit
-        ].create_invoice(Amount(unit=unit, amount=quote_request.amount))
+        ].create_invoice(Amount(unit=unit, amount=quote_request.amount, description_hash=quote_request.description_hash, unhashed_description=quote_request.unhashed_description))
         logger.trace(
             f"got invoice {invoice_response.payment_request} with checking id"
             f" {invoice_response.checking_id}"
