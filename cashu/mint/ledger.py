@@ -629,7 +629,7 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
 
         # make sure that the outputs (for fee return) are in the same unit as the quote
         if outputs:
-            await self._verify_outputs(outputs)
+            await self._verify_outputs(outputs, skip_amount_check=True)
             assert outputs[0].id, "output id not set"
             outputs_unit = self.keysets[outputs[0].id].unit
             assert melt_quote.unit == outputs_unit.name, (
