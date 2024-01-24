@@ -45,7 +45,7 @@ async def redeem_TokenV3_multimint(wallet: Wallet, token: TokenV3):
             "redeem_TokenV3_multimint: multimint redeem without URL"
         )
         mint_wallet = await Wallet.with_db(
-            t.mint, os.path.join(settings.cashu_dir, wallet.name)
+            t.mint, wallet.db.db_location
         )
         keyset_ids = mint_wallet._get_proofs_keysets(t.proofs)
         logger.trace(f"Keysets in tokens: {keyset_ids}")
@@ -146,7 +146,7 @@ async def receive(
         # now we have the URL
         mint_wallet = await Wallet.with_db(
             mint_keyset.mint_url,
-            os.path.join(settings.cashu_dir, wallet.name),
+            wallet.db.db_location),
         )
         await mint_wallet.load_mint(keyset_in_token)
         _, _ = await mint_wallet.redeem(proofs)

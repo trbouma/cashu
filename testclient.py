@@ -54,6 +54,13 @@ if mode =="invoice receive":
         print("balance:", wallet.balance_per_keyset())
         print(wallet.available_balance)
 
+if mode =="p2pk":
+    pubkey = asyncio.run(wallet.create_p2pk_pubkey())
+    lock_str = f"P2PK:{pubkey}"
+    print("---- Pay to public key (P2PK) lock ----\n")
+    print(f"Lock: {lock_str}")
+    print("")
+
 elif mode =="q":
     exit()
 
@@ -84,10 +91,11 @@ elif mode =="invoice send":
     print(" Invoice paid!")
 
 elif mode == "balance":
-    print("balance:", wallet.balance_per_keyset())
+    print("balance per keyset:", wallet.balance_per_keyset())
     print(wallet.balance, wallet.available_balance )
     balance_per_mint = asyncio.run(wallet.balance_per_minturl())
     print(balance_per_mint)
+    print(wallet.mint_keyset_ids)
     # print(wallet.proofs)
 elif mode == 'secrets':
     print(wallet.mnemonic)
