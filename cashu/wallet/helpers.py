@@ -146,8 +146,8 @@ async def receive(
         # now we have the URL
         mint_wallet = await Wallet.with_db(
             mint_keyset.mint_url,
-            wallet.db.db_location),
-        )
+            wallet.db.db_location)
+        
         await mint_wallet.load_mint(keyset_in_token)
         _, _ = await mint_wallet.redeem(proofs)
         print(f"Received {mint_wallet.unit.str(sum_proofs(proofs))}")
