@@ -26,6 +26,7 @@ from ..core.base import (
     Unit,
 )
 from ..core.crypto import b_dhke
+from ..core.crypto.aes import AESCipher
 from ..core.crypto.keys import (
     derive_keyset_id,
     derive_keyset_id_deprecated,
@@ -39,6 +40,7 @@ from ..core.errors import (
     KeysetNotFoundError,
     LightningError,
     NotAllowedError,
+    QuoteNotPaidError,
     TransactionError,
 )
 from ..core.helpers import sum_proofs
@@ -68,10 +70,18 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
         db: Database,
         seed: str,
         backends: Mapping[Method, Mapping[Unit, LightningBackend]],
+        seed_decryption_key: Optional[str] = None,
         derivation_path="",
         crud=LedgerCrudSqlite(),
     ):
-        self.master_key = seed
+        assert seed, "seed not set"
+
+        # decrypt seed if seed_decryption_key is set
+        self.master_key = (
+            AESCipher(seed_decryption_key).decrypt(seed)
+            if seed_decryption_key
+            else seed
+        )
         self.derivation_path = derivation_path
 
         self.db = db
@@ -82,7 +92,14 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
 
     # ------- KEYS -------
 
-    async def activate_keyset(self, derivation_path, autosave=True) -> MintKeyset:
+    async def activate_keyset(
+        self,
+        *,
+        derivation_path: str,
+        seed: Optional[str] = None,
+        version: Optional[str] = None,
+        autosave=True,
+    ) -> MintKeyset:
         """Load the keyset for a derivation path if it already exists. If not generate new one and store in the db.
 
         Args:
@@ -92,29 +109,33 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
         Returns:
             MintKeyset: Keyset
         """
-        logger.debug(f"Activating keyset for derivation path {derivation_path}")
+        assert derivation_path, "derivation path not set"
+        seed = seed or self.master_key
+        tmp_keyset_local = MintKeyset(
+            seed=seed,
+            derivation_path=derivation_path,
+            version=version or settings.version,
+        )
+        logger.debug(
+            f"Activating keyset for derivation path {derivation_path} with id"
+            f" {tmp_keyset_local.id}."
+        )
         # load the keyset from db
         logger.trace(f"crud: loading keyset for {derivation_path}")
-        tmp_keyset_local: List[MintKeyset] = await self.crud.get_keyset(
-            derivation_path=derivation_path, db=self.db
+        tmp_keysets_local: List[MintKeyset] = await self.crud.get_keyset(
+            id=tmp_keyset_local.id, db=self.db
         )
-        logger.trace(f"crud: loaded {len(tmp_keyset_local)} keysets")
-        if tmp_keyset_local:
+        logger.trace(f"crud: loaded {len(tmp_keysets_local)} keysets")
+        if tmp_keysets_local:
             # we have a keyset with this derivation path in the database
-            keyset = tmp_keyset_local[0]
-            # we keys are not stored in the database but only their derivation path
-            # so we might need to generate the keys for keysets loaded from the database
-            if not len(keyset.private_keys):
-                keyset.generate_keys()
-
+            keyset = tmp_keysets_local[0]
         else:
-            logger.trace(f"crud: no keyset for {derivation_path}")
             # no keyset for this derivation path yet
             # we create a new keyset (keys will be generated at instantiation)
             keyset = MintKeyset(
-                seed=self.master_key,
+                seed=seed or self.master_key,
                 derivation_path=derivation_path,
-                version=settings.version,
+                version=version or settings.version,
             )
             logger.debug(f"Generated new keyset {keyset.id}.")
             if autosave:
@@ -138,40 +159,31 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
 
     async def init_keysets(self, autosave=True) -> None:
         """Initializes all keysets of the mint from the db. Loads all past keysets from db
-        and generate their keys. Then load the current keyset.
+        and generate their keys. Then activate the current keyset set by self.derivation_path.
 
         Args:
             autosave (bool, optional): Whether the current keyset should be saved if it is
             not in the database yet. Will be passed to `self.activate_keyset` where it is
             generated from `self.derivation_path`. Defaults to True.
         """
-        # load all past keysets from db
+        # load all past keysets from db, the keys will be generated at instantiation
         tmp_keysets: List[MintKeyset] = await self.crud.get_keyset(db=self.db)
-        logger.debug(
-            f"Loaded {len(tmp_keysets)} keysets from database. Generating keys..."
-        )
-        # add keysets from db to current keysets
+
+        # add keysets from db to memory
         for k in tmp_keysets:
             self.keysets[k.id] = k
 
-        # generate keys for all keysets in the database
-        for _, v in self.keysets.items():
-            # if we already generated the keys for this keyset, skip
-            if v.id and v.public_keys and len(v.public_keys):
-                continue
-            logger.trace(f"Generating keys for keyset {v.id}")
-            v.seed = self.master_key
-            v.generate_keys()
-
-        logger.info(f"Initialized {len(self.keysets)} keysets from the database.")
-
         # activate the current keyset set by self.derivation_path
-        self.keyset = await self.activate_keyset(self.derivation_path, autosave)
+        if self.derivation_path:
+            self.keyset = await self.activate_keyset(
+                derivation_path=self.derivation_path, autosave=autosave
+            )
+            logger.info(f"Current keyset: {self.keyset.id}")
+
         logger.info(
-            "Activated keysets from database:"
+            f"Loaded {len(self.keysets)} keysets:"
             f" {[f'{k} ({v.unit.name})' for k, v in self.keysets.items()]}"
         )
-        logger.info(f"Current keyset: {self.keyset.id}")
 
         # check that we have a least one active keyset
         assert any([k.active for k in self.keysets.values()]), "No active keyset found."
@@ -190,7 +202,6 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
             self.keysets[keyset_copy.id] = keyset_copy
             # remember which keyset this keyset was duplicated from
             logger.debug(f"Duplicated keyset id {keyset.id} -> {keyset_copy.id}")
-
         # END BACKWARDS COMPATIBILITY < 0.15.0
 
     def get_keyset(self, keyset_id: Optional[str] = None) -> Dict[int, str]:
@@ -296,6 +307,7 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
             MintQuote: Mint quote object.
         """
         logger.trace("called request_mint")
+        assert quote_request.amount > 0, "amount must be positive"
         if settings.mint_max_peg_in and quote_request.amount > settings.mint_max_peg_in:
             raise NotAllowedError(
                 f"Maximum mint amount is {settings.mint_max_peg_in} sat."
@@ -369,6 +381,7 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
             if status.paid:
                 logger.trace(f"Setting quote {quote_id} as paid")
                 quote.paid = True
+                quote.paid_time = int(time.time())
                 await self.crud.update_mint_quote(quote=quote, db=self.db)
 
         return quote
@@ -405,7 +418,7 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
         )  # create a new lock if it doesn't exist
         async with self.locks[quote_id]:
             quote = await self.get_mint_quote(quote_id=quote_id)
-            assert quote.paid, "quote not paid"
+            assert quote.paid, QuoteNotPaidError()
             assert not quote.issued, "quote already issued"
             assert (
                 quote.amount == sum_amount_outputs
@@ -597,6 +610,7 @@ class Ledger(LedgerVerification, LedgerSpendingConditions):
         await self.crud.update_melt_quote(quote=melt_quote, db=self.db)
 
         mint_quote.paid = True
+        mint_quote.paid_time = melt_quote.paid_time
         await self.crud.update_mint_quote(quote=mint_quote, db=self.db)
 
         return melt_quote
