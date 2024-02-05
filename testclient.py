@@ -8,6 +8,7 @@ from cashu.core.base import Proof, DLEQWallet
 from cashu.core.migrations import migrate_databases
 from cashu.wallet import migrations
 import datetime
+import requests
 from cashu.core.base import TokenV1, TokenV2, TokenV3, TokenV3Token
 
 from cashu.wallet.helpers import (
@@ -91,11 +92,18 @@ elif mode =="invoice send":
     print(" Invoice paid!")
 
 elif mode == "balance":
-    print("balance per keyset:", wallet.balance_per_keyset())
+    balance_per_keyset = wallet.balance_per_keyset()
+    print("balance per keyset:", balance_per_keyset)
     print(wallet.balance, wallet.available_balance )
     balance_per_mint = asyncio.run(wallet.balance_per_minturl())
     print(balance_per_mint)
-    print(wallet.mint_keyset_ids)
+    response = requests.get(mint + "/v1/keysets")
+    print("home keyset", response.json()['keysets'][0]['id'])
+    
+    print(wallet.keysets)
+    for each in balance_per_keyset:
+        print(balance_per_keyset[each]['available'])
+
     # print(wallet.proofs)
 elif mode == 'secrets':
     print(wallet.mnemonic)
