@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 
 from .crypto.aes import AESCipher
+from .crypto.b_dhke import hash_to_curve
 from .crypto.keys import (
     derive_keys,
     derive_keys_sha256,
@@ -90,8 +91,9 @@ class Proof(BaseModel):
     id: Union[None, str] = ""
     amount: int = 0
     secret: str = ""  # secret or message to be blinded and signed
+    Y: str = ""  # hash_to_curve(secret)
     C: str = ""  # signature on secret, unblinded by wallet
-    dleq: Union[DLEQWallet, None] = None  # DLEQ proof
+    dleq: Optional[DLEQWallet] = None  # DLEQ proof
     witness: Union[None, str] = ""  # witness for spending condition
 
     # whether this proof is reserved for sending, used for coin management in the wallet
@@ -107,6 +109,11 @@ class Proof(BaseModel):
     melt_id: Union[None, str] = (
         None  # holds the id of the melt operation that destroyed this proof
     )
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        if not self.Y:
+            self.Y = hash_to_curve(self.secret.encode("utf-8")).serialize().hex()
 
     @classmethod
     def from_dict(cls, proof_dict: dict):

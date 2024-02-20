@@ -49,8 +49,8 @@ class LedgerCrud(ABC):
     async def get_proof_used(
         self,
         *,
+        Y: str,
         db: Database,
-        secret: str,
         conn: Optional[Connection] = None,
     ) -> Optional[Proof]: ...
 
@@ -67,6 +67,7 @@ class LedgerCrud(ABC):
     async def get_proofs_pending(
         self,
         *,
+        proofs: List[Proof],
         db: Database,
         conn: Optional[Connection] = None,
     ) -> List[Proof]: ...
@@ -273,13 +274,14 @@ class LedgerCrudSqlite(LedgerCrud):
         await (conn or db).execute(
             f"""
             INSERT INTO {table_with_schema(db, 'proofs_used')}
-            (amount, C, secret, id, witness, created)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (amount, C, secret, Y, id, witness, created)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 proof.amount,
                 proof.C,
                 proof.secret,
+                proof.Y,
                 proof.id,
                 proof.witness,
                 timestamp_now(db),
@@ -289,12 +291,17 @@ class LedgerCrudSqlite(LedgerCrud):
     async def get_proofs_pending(
         self,
         *,
+        proofs: List[Proof],
         db: Database,
         conn: Optional[Connection] = None,
     ) -> List[Proof]:
-        rows = await (conn or db).fetchall(f"""
+        rows = await (conn or db).fetchall(
+            f"""
             SELECT * from {table_with_schema(db, 'proofs_pending')}
-            """)
+            WHERE Y IN ({','.join(['?']*len(proofs))})
+            """,
+            tuple(proof.Y for proof in proofs),
+        )
         return [Proof(**r) for r in rows]
 
     async def set_proof_pending(
@@ -308,13 +315,14 @@ class LedgerCrudSqlite(LedgerCrud):
         await (conn or db).execute(
             f"""
             INSERT INTO {table_with_schema(db, 'proofs_pending')}
-            (amount, C, secret, created)
-            VALUES (?, ?, ?, ?)
+            (amount, C, secret, Y, created)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 proof.amount,
-                str(proof.C),
-                str(proof.secret),
+                proof.C,
+                proof.secret,
+                proof.Y,
                 timestamp_now(db),
             ),
         )
@@ -605,16 +613,17 @@ class LedgerCrudSqlite(LedgerCrud):
 
     async def get_proof_used(
         self,
+        *,
+        Y: str,
         db: Database,
-        secret: str,
         conn: Optional[Connection] = None,
     ) -> Optional[Proof]:
         row = await (conn or db).fetchone(
             f"""
             SELECT * from {table_with_schema(db, 'proofs_used')}
-            WHERE secret = ?
+            WHERE Y = ?
             """,
-            (secret,),
+            (Y,),
         )
         return Proof(**row) if row else None
 
