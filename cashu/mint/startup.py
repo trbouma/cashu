@@ -36,6 +36,10 @@ for key, value in settings.dict().items():
         "mint_corelightning_rest_macaroon",
     ]:
         value = "********" if value is not None else None
+
+    if key == "mint_database" and value and value.startswith("postgres://"):
+        value = "postgres://********"
+
     logger.debug(f"{key}: {value}")
 
 wallets_module = importlib.import_module("cashu.lightning")
@@ -51,6 +55,11 @@ if settings.mint_backend_bolt11_usd:
         unit=Unit.usd
     )
     backends.setdefault(Method.bolt11, {})[Unit.usd] = backend_bolt11_usd
+if settings.mint_backend_bolt11_eur:
+    backend_bolt11_eur = getattr(wallets_module, settings.mint_backend_bolt11_eur)(
+        unit=Unit.eur
+    )
+    backends.setdefault(Method.bolt11, {})[Unit.eur] = backend_bolt11_eur
 if not backends:
     raise Exception("No backends are set.")
 

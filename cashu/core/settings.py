@@ -58,12 +58,16 @@ class MintSettings(CashuSettings):
 
     mint_database: str = Field(default="data/mint")
     mint_test_database: str = Field(default="test_data/test_mint")
+    mint_max_secret_length: int = Field(default=512)
+
+    mint_input_fee_ppk: int = Field(default=0)
 
 
 class MintBackends(MintSettings):
     mint_lightning_backend: str = Field(default="")  # deprecated
     mint_backend_bolt11_sat: str = Field(default="")
     mint_backend_bolt11_usd: str = Field(default="")
+    mint_backend_bolt11_eur: str = Field(default="")
 
     mint_lnbits_endpoint: str = Field(default=None)
     mint_lnbits_key: str = Field(default=None)
@@ -117,14 +121,20 @@ class MintLimits(MintSettings):
         title="Maximum mint balance",
         description="Maximum mint balance.",
     )
+    mint_websocket_read_timeout: int = Field(
+        default=10 * 60,
+        gt=0,
+        title="Websocket read timeout",
+        description="Timeout for reading from a websocket.",
+    )
 
 
 class FakeWalletSettings(MintSettings):
     fakewallet_brr: bool = Field(default=True)
-    fakewallet_delay_payment: bool = Field(default=False)
+    fakewallet_delay_outgoing_payment: Optional[int] = Field(default=3)
+    fakewallet_delay_incoming_payment: Optional[int] = Field(default=3)
     fakewallet_stochastic_invoice: bool = Field(default=False)
     fakewallet_payment_state: Optional[bool] = Field(default=None)
-    mint_cache_secrets: bool = Field(default=True)
 
 
 class MintInformation(CashuSettings):
@@ -170,10 +180,13 @@ class WalletSettings(CashuSettings):
     locktime_delta_seconds: int = Field(default=86400)  # 1 day
     proofs_batch_size: int = Field(default=1000)
 
+    wallet_target_amount_count: int = Field(default=3)
+
 
 class LndRestFundingSource(MintSettings):
     mint_lnd_rest_endpoint: Optional[str] = Field(default=None)
     mint_lnd_rest_cert: Optional[str] = Field(default=None)
+    mint_lnd_rest_cert_verify: bool = Field(default=True)
     mint_lnd_rest_macaroon: Optional[str] = Field(default=None)
     mint_lnd_rest_admin_macaroon: Optional[str] = Field(default=None)
     mint_lnd_rest_invoice_macaroon: Optional[str] = Field(default=None)

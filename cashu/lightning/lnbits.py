@@ -1,13 +1,14 @@
 # type: ignore
-from typing import Optional
+from typing import AsyncGenerator, Optional
 
 import httpx
 from bolt11 import (
     decode,
 )
 
-from ..core.base import Amount, MeltQuote, PostMeltQuoteRequest, Unit
+from ..core.base import Amount, MeltQuote, Unit
 from ..core.helpers import fee_reserve
+from ..core.models import PostMeltQuoteRequest
 from ..core.settings import settings
 from .base import (
     InvoiceResponse,
@@ -181,3 +182,6 @@ class LNbitsWallet(LightningBackend):
             fee=fees.to(self.unit, round="up"),
             amount=amount.to(self.unit, round="up"),
         )
+
+    async def paid_invoices_stream(self) -> AsyncGenerator[str, None]:
+        raise NotImplementedError("paid_invoices_stream not implemented")
