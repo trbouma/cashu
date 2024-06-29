@@ -23,6 +23,19 @@ def derive_keys(mnemonic: str, derivation_path: str):
         for i in range(settings.max_order)
     }
 
+def derive_key_for_amount(mnemonic: str, derivation_path: str, amount: int):
+    """
+    Deterministic derivation of keys for 2^n values.
+    """
+    
+    bip32 = BIP32.from_seed(mnemonic.encode())
+    amount_str = f"/{amount}'" 
+
+    print(amount_str)
+    return {amount: PrivateKey(
+            bip32.get_privkey_from_path(derivation_path + amount_str),
+            raw=True,
+        )}
 
 def derive_keys_sha256(seed: str, derivation_path: str = ""):
     """
