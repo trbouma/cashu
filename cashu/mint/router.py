@@ -9,6 +9,7 @@ from ..core.models import (
     KeysetsResponse,
     KeysetsResponseKeyset,
     KeysResponse,
+    KeyResponseAmount,
     KeysResponseKeyset,
     PostCheckStateRequest,
     PostCheckStateResponse,
@@ -27,6 +28,8 @@ from ..core.models import (
 from ..core.settings import settings
 from ..mint.startup import ledger
 from .limit import limit_websocket, limiter
+from ..core.crypto.keys import derive_key_for_amount, derive_pubkey
+from binascii import hexlify
 
 router: APIRouter = APIRouter()
 
@@ -79,6 +82,37 @@ async def keys():
     return KeysResponse(keysets=keyset_for_response)
 
 
+
+@router.get(
+    "/v1/keyforamount/{amount}",
+    name="Mint public keys",
+    summary="Get the public keys of the newest mint keyset",
+    response_description=(
+        "All supported token values their associated public keys for all active keysets"
+    ),
+    response_model=KeyResponseAmount,
+    tags=["Amount"]
+    
+)
+async def keyforamount(amount: int):
+    """This endpoint returns the associated public key of the current keyset for a specific denomination amount."""
+    logger.trace("> GET /v1/keyamount")
+    keyset = ledger.keyset
+    
+    print(keyset.id)
+    # largest amount is 2147483647
+    # mnemonic_str = "solution jelly sight much comic woman salad shift elbow diesel movie immense"
+    # test = derive_key_for_amount(keyset.seed,keyset.derivation_path,amount)
+    pubkey = derive_key_for_amount(keyset.seed, keyset.derivation_path, amount)
+    # print(hexlify(test.serialize()).decode())
+    
+    # pubkey_hex = test[amount].serialize()
+    print(keyset.unit)
+
+    
+    
+    return KeyResponseAmount(id=keyset.id,unit=str(keyset.unit), amount=amount,key=pubkey)
+
 @router.get(
     "/v1/keys/{keyset_id}",
     name="Keyset public keys",
@@ -113,6 +147,46 @@ async def keyset_keys(keyset_id: str) -> KeysResponse:
     )
     return KeysResponse(keysets=[keyset_for_response])
 
+@router.get(
+    "/v1/key/{keyset_id}/{amount}",
+    name="Keyset public keys",
+    summary="Public keys of a specific keyset",
+    response_description=(
+        "All supported token values of the mint and their associated"
+        " public key for a specific keyset."
+    ),
+    response_model=KeyResponseAmount,
+    tags = ["Amount"]
+)
+async def keyset_amount_key(keyset_id: str, amount: int) -> KeyResponseAmount:
+    """
+    Get the public keys of the mint from a specific keyset id and the specific denomination amount.
+    """
+    logger.trace(f"> GET /v1/keys/{keyset_id}")
+    # BEGIN BACKWARDS COMPATIBILITY < 0.15.0
+    # if keyset_id is not hex, we assume it is base64 and sanitize it
+    try:
+        int(keyset_id, 16)
+    except ValueError:
+        keyset_id = keyset_id.replace("-", "+").replace("_", "/")
+    # END BACKWARDS COMPATIBILITY < 0.15.0
+
+    keyset = ledger.keysets.get(keyset_id)
+    if keyset is None:
+        raise KeysetNotFoundError(keyset_id)
+    print(keyset.seed)
+    keyset_for_response = KeysResponseKeyset(
+        id=keyset.id,        
+        unit=keyset.unit.name,
+        keys={k: v for k, v in keyset.public_keys_hex.items()},
+    )
+
+    pubkey = derive_key_for_amount(keyset.seed, keyset.derivation_path, amount)
+    print(settings.mint_database)
+    return KeyResponseAmount(id=keyset.id,unit=str(keyset.unit), amount=amount,key=pubkey)
+   
+
+    # return KeysResponse(keysets=[keyset_for_response])
 
 @router.get(
     "/v1/keysets",
@@ -233,6 +307,33 @@ async def mint(
     logger.trace(f"> POST /v1/mint/bolt11: {payload}")
 
     promises = await ledger.mint(outputs=payload.outputs, quote_id=payload.quote)
+    blinded_signatures = PostMintResponse(signatures=promises)
+    logger.trace(f"< POST /v1/mint/bolt11: {blinded_signatures}")
+    return blinded_signatures
+
+@router.post(
+    "/v1/mint/bolt11foramount",
+    name="Mint tokens with a Lightning payment",
+    summary="Mint tokens by paying a bolt11 Lightning invoice.",
+    response_model=PostMintResponse,
+    response_description=(
+        "A list of blinded signatures that can be used to create proofs."
+    ),
+    tags=["Amount"]
+)
+@limiter.limit(f"{settings.mint_transaction_rate_limit_per_minute}/minute")
+async def mint_for_amount(
+    request: Request,
+    payload: PostMintRequest,
+) -> PostMintResponse:
+    """
+    Requests the minting of tokens belonging to a paid payment request.
+
+    Call this endpoint after `POST /v1/mint/quote`.
+    """
+    logger.trace(f"> POST /v1/mint/bolt11: {payload}")
+
+    promises = await ledger.mint_for_amount(outputs=payload.outputs, quote_id=payload.quote)
     blinded_signatures = PostMintResponse(signatures=promises)
     logger.trace(f"< POST /v1/mint/bolt11: {blinded_signatures}")
     return blinded_signatures

@@ -69,6 +69,11 @@ class KeysResponseKeyset(BaseModel):
 class KeysResponse(BaseModel):
     keysets: List[KeysResponseKeyset]
 
+class KeyResponseAmount(BaseModel):
+    id: str
+    unit: str
+    amount: int
+    key: str
 
 class KeysetsResponseKeyset(BaseModel):
     id: str

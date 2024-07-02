@@ -25,17 +25,18 @@ def derive_keys(mnemonic: str, derivation_path: str):
 
 def derive_key_for_amount(mnemonic: str, derivation_path: str, amount: int):
     """
-    Deterministic derivation of keys for 2^n values.
+    Deterministic derivation of keys for amount values.
+    Max value is 2147483647
     """
     
     bip32 = BIP32.from_seed(mnemonic.encode())
     amount_str = f"/{amount}'" 
 
     print(amount_str)
-    return {amount: PrivateKey(
+    return PrivateKey(
             bip32.get_privkey_from_path(derivation_path + amount_str),
             raw=True,
-        )}
+        ).pubkey.serialize().hex()
 
 def derive_keys_sha256(seed: str, derivation_path: str = ""):
     """
@@ -54,6 +55,7 @@ def derive_keys_sha256(seed: str, derivation_path: str = ""):
 
 
 def derive_pubkey(seed: str):
+    print(seed)
     return PrivateKey(
         hashlib.sha256((seed).encode("utf-8")).digest()[:32],
         raw=True,

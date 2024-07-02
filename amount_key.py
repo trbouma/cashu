@@ -3,15 +3,15 @@ from cashu.core.crypto.keys import derive_key_for_amount, derive_pubkey
 from binascii import hexlify
 
 mnemo = Mnemonic("english")
-# mnemonic_str = mnemo.generate()
-# print(mnemonic_str)
+seed = bytes("the)")
+
 mnemonic_str = "solution jelly sight much comic woman salad shift elbow diesel movie immense"
-amount = int(21e8)           
+amount = int(13634523)           
 
 test = derive_key_for_amount(mnemonic_str,"m/0'/0'/0'",amount)
-seed = test[amount].serialize()
+privkey_hex = test[amount].serialize()
 
-print(seed)
+print(privkey_hex)
 
-pubkey= hexlify(derive_pubkey(seed).serialize()).decode()
-print(pubkey)
+pubkey_hex= hexlify(derive_pubkey(privkey_hex).serialize()).decode()
+print(pubkey_hex)
