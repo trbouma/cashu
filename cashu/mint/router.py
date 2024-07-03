@@ -88,7 +88,7 @@ async def keys():
 @router.get(
     "/v1/keyforamount/{amount}",
     name="Mint public keys",
-    summary="Get the public keys of the newest mint keyset",
+    summary="Get the public key of the newest mint keyset for a specific denomination amount",
     response_description=(
         "All supported token values their associated public keys for all active keysets"
     ),
@@ -151,8 +151,8 @@ async def keyset_keys(keyset_id: str) -> KeysResponse:
 
 @router.get(
     "/v1/key/{keyset_id}/{amount}",
-    name="Keyset public keys",
-    summary="Public keys of a specific keyset",
+    name="Keyset public key for a specific denomination amout",
+    summary="Public key of a specific keyset for a specific denomination amout",
     response_description=(
         "All supported token values of the mint and their associated"
         " public key for a specific keyset."
@@ -162,7 +162,7 @@ async def keyset_keys(keyset_id: str) -> KeysResponse:
 )
 async def keyset_amount_key(keyset_id: str, amount: int) -> KeyResponseAmount:
     """
-    Get the public keys of the mint from a specific keyset id and the specific denomination amount.
+    Get the public key of the mint from a specific keyset id for the specific denomination amount.
     """
     logger.trace(f"> GET /v1/keys/{keyset_id}")
     # BEGIN BACKWARDS COMPATIBILITY < 0.15.0
