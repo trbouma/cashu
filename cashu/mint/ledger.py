@@ -25,6 +25,7 @@ from ..core.crypto import b_dhke
 from ..core.crypto.aes import AESCipher
 from ..core.crypto.keys import (
     derive_pubkey,
+    derive_private_key_for_amount,
     random_hash,
 )
 from ..core.crypto.secp import PrivateKey, PublicKey
@@ -546,9 +547,9 @@ class Ledger(LedgerVerification, LedgerSpendingConditions, LedgerTasks, LedgerFe
     async def mint_for_amount(
         self,
         *,
-        outputs: List[BlindedMessage],
+        output: BlindedMessage,
         quote_id: str,
-    ) -> List[BlindedSignature]:
+    ) -> BlindedSignature:
         """Mints new coins if quote with `quote_id` was paid. Ingest blind messages `outputs` and returns blind signatures `promises`.
 
         Args:
@@ -567,16 +568,17 @@ class Ledger(LedgerVerification, LedgerSpendingConditions, LedgerTasks, LedgerFe
             List[BlindedSignature]: Signatures on the outputs.
         """
         logger.trace("called mint")
-        await self._verify_outputs(outputs)
-        sum_amount_outputs = sum([b.amount for b in outputs])
+        await self._verify_outputs([output])
+        sum_amount_outputs = output.amount
         # we already know from _verify_outputs that all outputs have the same unit because they have the same keyset
-        output_unit = self.keysets[outputs[0].id].unit
-
+        output_unit = self.keysets[output.id].unit
+        print(f"Output:{output.amount}")
         self.locks[quote_id] = (
             self.locks.get(quote_id) or asyncio.Lock()
         )  # create a new lock if it doesn't exist
         async with self.locks[quote_id]:
             quote = await self.get_mint_quote(quote_id=quote_id)
+            print(f"Quote:{quote.amount}")
             if not quote.paid:
                 raise QuoteNotPaidError()
             if quote.issued:
@@ -599,14 +601,14 @@ class Ledger(LedgerVerification, LedgerSpendingConditions, LedgerTasks, LedgerFe
             quote.state = MintQuoteState.issued
             await self.crud.update_mint_quote(quote=quote, db=self.db)
 
-            promises = await self._generate_promises_for_amount(outputs)
-            logger.trace("generated promises")
+            promise = await self._generate_promise_for_amount(output)
+            logger.trace("generated promise")
 
             # submit the quote update to the event manager
             await self.events.submit(quote)
 
         del self.locks[quote_id]
-        return promises
+        return promise
 
     def create_internal_melt_quote(
         self, mint_quote: MintQuote, melt_quote: PostMeltQuoteRequest
@@ -1146,13 +1148,13 @@ class Ledger(LedgerVerification, LedgerSpendingConditions, LedgerTasks, LedgerFe
                 signatures.append(signature)
             return signatures
 
-    async def _generate_promises_for_amount(
+    async def _generate_promise_for_amount(
         self,
-        outputs: List[BlindedMessage],
+        output: BlindedMessage,
         keyset: Optional[MintKeyset] = None,
         conn: Optional[Connection] = None,
-    ) -> list[BlindedSignature]:
-        """Generates a promises (Blind signatures) for given amount and returns a pair (amount, C').
+    ) -> BlindedSignature:
+        """Generates a promise (Blind signatures) for given amount and returns a pair (amount, C').
 
         Important: When a promises is once created it should be considered issued to the user since the user
         will always be able to restore promises later through the backup restore endpoint. That means that additional
@@ -1167,47 +1169,48 @@ class Ledger(LedgerVerification, LedgerSpendingConditions, LedgerTasks, LedgerFe
         Returns:
             list[BlindedSignature]: Generated BlindedSignatures.
         """
-        promises: List[
-            Tuple[str, PublicKey, int, PublicKey, PrivateKey, PrivateKey]
-        ] = []
-        for output in outputs:
-            B_ = PublicKey(bytes.fromhex(output.B_), raw=True)
-            keyset = keyset or self.keysets[output.id]
-            if output.id not in self.keysets:
-                raise TransactionError(f"keyset {output.id} not found")
-            if output.id != keyset.id:
-                raise TransactionError("keyset id does not match output id")
-            if not keyset.active:
-                raise TransactionError("keyset is not active")
-            keyset_id = output.id
-            logger.trace(f"Generating promise with keyset {keyset_id}.")
-            private_key_amount = keyset.private_keys[output.amount]
-            C_, e, s = b_dhke.step2_bob(B_, private_key_amount)
-            promises.append((keyset_id, B_, output.amount, C_, e, s))
+       
+        
+        B_ = PublicKey(bytes.fromhex(output.B_), raw=True)
+        keyset = keyset or self.keysets[output.id]
+        if output.id not in self.keysets:
+            raise TransactionError(f"keyset {output.id} not found")
+        if output.id != keyset.id:
+            raise TransactionError("keyset id does not match output id")
+        if not keyset.active:
+            raise TransactionError("keyset is not active")
+        keyset_id = output.id
+        #TODO find right private key
+        logger.trace(f"Generating promise with keyset {keyset_id}.")
+        # private_key_amount = keyset.private_keys[output.amount]
+        private_key_amount = derive_private_key_for_amount(keyset.seed,keyset.derivation_path,output.amount)
+        C_, e, s = b_dhke.step2_bob(B_, private_key_amount)
+        promise = (keyset_id, B_, output.amount, C_, e, s)
+            
 
         keyset = keyset or self.keyset
 
         signatures = []
         async with get_db_connection(self.db, conn) as conn:
-            for promise in promises:
-                keyset_id, B_, amount, C_, e, s = promise
-                logger.trace(f"crud: _generate_promise storing promise for {amount}")
-                await self.crud.store_promise(
-                    amount=amount,
-                    id=keyset_id,
-                    b_=B_.serialize().hex(),
-                    c_=C_.serialize().hex(),
-                    e=e.serialize(),
-                    s=s.serialize(),
-                    db=self.db,
-                    conn=conn,
+            
+            keyset_id, B_, amount, C_, e, s = promise
+            logger.trace(f"crud: _generate_promise storing promise for {amount}")
+            await self.crud.store_promise(
+                amount=amount,
+                id=keyset_id,
+                b_=B_.serialize().hex(),
+                c_=C_.serialize().hex(),
+                e=e.serialize(),
+                s=s.serialize(),
+                db=self.db,
+                conn=conn,
                 )
-                logger.trace(f"crud: _generate_promise stored promise for {amount}")
-                signature = BlindedSignature(
-                    id=keyset_id,
-                    amount=amount,
-                    C_=C_.serialize().hex(),
-                    dleq=DLEQ(e=e.serialize(), s=s.serialize()),
+            logger.trace(f"crud: _generate_promise stored promise for {amount}")
+            signature = BlindedSignature(
+                id=keyset_id,
+                amount=amount,
+                C_=C_.serialize().hex(),
+                dleq=DLEQ(e=e.serialize(), s=s.serialize()),
                 )
-                signatures.append(signature)
-            return signatures
+                
+            return signature

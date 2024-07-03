@@ -128,10 +128,15 @@ class PostMintRequest(BaseModel):
         ..., max_items=settings.mint_max_request_length
     )
 
+class PostMintRequestForAmount(BaseModel):
+    quote: str = Field(..., max_length=settings.mint_max_request_length)  # quote id
+    output: BlindedMessage 
 
 class PostMintResponse(BaseModel):
     signatures: List[BlindedSignature] = []
 
+class PostMintResponseAmount(BaseModel):
+    signature: BlindedSignature
 
 class GetMintResponse_deprecated(BaseModel):
     pr: str

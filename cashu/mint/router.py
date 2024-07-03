@@ -19,7 +19,9 @@ from ..core.models import (
     PostMintQuoteRequest,
     PostMintQuoteResponse,
     PostMintRequest,
+    PostMintRequestForAmount,
     PostMintResponse,
+    PostMintResponseAmount,
     PostRestoreRequest,
     PostRestoreResponse,
     PostSplitRequest,
@@ -217,6 +219,7 @@ async def keysets() -> KeysetsResponse:
     summary="Request a quote for minting of new tokens",
     response_model=PostMintQuoteResponse,
     response_description="A payment request to mint tokens of a denomination",
+    tags = ["Amount"]
 )
 @limiter.limit(f"{settings.mint_transaction_rate_limit_per_minute}/minute")
 async def mint_quote(
@@ -315,28 +318,29 @@ async def mint(
     "/v1/mint/bolt11foramount",
     name="Mint tokens with a Lightning payment",
     summary="Mint tokens by paying a bolt11 Lightning invoice.",
-    response_model=PostMintResponse,
+    response_model=PostMintResponseAmount,
     response_description=(
-        "A list of blinded signatures that can be used to create proofs."
+        "A blinded signature that can be used to create an amount proof."
     ),
     tags=["Amount"]
 )
 @limiter.limit(f"{settings.mint_transaction_rate_limit_per_minute}/minute")
 async def mint_for_amount(
     request: Request,
-    payload: PostMintRequest,
-) -> PostMintResponse:
+    payload: PostMintRequestForAmount,
+) -> PostMintResponseAmount:
     """
     Requests the minting of tokens belonging to a paid payment request.
 
     Call this endpoint after `POST /v1/mint/quote`.
     """
-    logger.trace(f"> POST /v1/mint/bolt11: {payload}")
+    logger.trace(f"> POST /v1/mint/bolt11foramount: {payload}")
 
-    promises = await ledger.mint_for_amount(outputs=payload.outputs, quote_id=payload.quote)
-    blinded_signatures = PostMintResponse(signatures=promises)
-    logger.trace(f"< POST /v1/mint/bolt11: {blinded_signatures}")
-    return blinded_signatures
+    promise = await ledger.mint_for_amount(output=payload.output, quote_id=payload.quote)
+    print("did we get here? 340")
+    blinded_signature = PostMintResponseAmount(signature=promise)
+    logger.trace(f"< POST /v1/mint/bolt11: {blinded_signature}")
+    return blinded_signature
 
 
 @router.post(
