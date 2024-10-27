@@ -237,7 +237,11 @@ class PostSplitRequest(BaseModel):
     outputs: List[BlindedMessage] = Field(
         ..., max_items=settings.mint_max_request_length
     )
-
+class PostSplitRequestAmount(BaseModel):
+    input: Proof 
+    outputs: List[BlindedMessage] = Field(
+        ..., max_items=settings.mint_max_request_length
+    )
 
 class PostSplitResponse(BaseModel):
     signatures: List[BlindedSignature]

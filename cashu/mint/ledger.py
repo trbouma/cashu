@@ -1063,6 +1063,59 @@ class Ledger(LedgerVerification, LedgerSpendingConditions, LedgerTasks, LedgerFe
         logger.trace("split successful")
         return promises
 
+    async def split_for_amount(
+        self,
+        *,
+        proof: Proof,
+        outputs: List[BlindedMessage],
+        keyset: Optional[MintKeyset] = None,
+    ):
+        """Consumes proofs and prepares new promises based on the amount split. Used for splitting tokens
+        Before sending or for redeeming tokens for new ones that have been received by another wallet.
+
+        Args:
+            proofs (List[Proof]): Proofs to be invalidated for the split.
+            outputs (List[BlindedMessage]): New outputs that should be signed in return.
+            keyset (Optional[MintKeyset], optional): Keyset to use. Uses default keyset if not given. Defaults to None.
+
+        Raises:
+            Exception: Validation of proofs or outputs failed
+
+        Returns:
+            Tuple[List[BlindSignature],List[BlindSignature]]: Promises on both sides of the split.
+        """
+        logger.trace("split called")
+        # explicitly check that amount of inputs is equal to amount of outputs
+        # note: we check this again in verify_inputs_and_outputs but only if any
+        # outputs are provided at all. To make sure of that before calling
+        # verify_inputs_and_outputs, we check it here.
+        self._verify_equation_balanced([proof], outputs)
+        
+        # verify spending inputs, outputs, and spending conditions
+        await self.verify_inputs_and_outputs_for_amount(proofs=[proof], outputs=outputs)
+
+        await self.db_write._set_proofs_pending([proof])
+        try:
+            # Mark proofs as used and prepare new promises
+            async with get_db_connection(self.db) as conn:
+                # we do this in a single db transaction
+                await self._invalidate_proofs(proofs=[proof], conn=conn)
+                # do a promise for each amount
+                promises = []
+                for output in outputs:
+                    promise = await self._generate_promises(outputs, keyset, conn)
+                    promises = promises.append(promise)
+
+        except Exception as e:
+            logger.trace(f"split failed: {e}")
+            raise e
+        finally:
+            # delete proofs from pending list
+            await self.db_write._unset_proofs_pending([proof])
+
+        logger.trace("split successful")
+        return promises
+
     async def restore(
         self, outputs: List[BlindedMessage]
     ) -> Tuple[List[BlindedMessage], List[BlindedSignature]]:

@@ -109,6 +109,7 @@ def step3_alice(C_: PublicKey, r: PrivateKey, A: PublicKey) -> PublicKey:
 def verify(a: PrivateKey, C: PublicKey, secret_msg: str) -> bool:
     Y: PublicKey = hash_to_curve(secret_msg.encode("utf-8"))
     valid = C == Y.mult(a)  # type: ignore
+    print("secret message", secret_msg)
     # BEGIN: BACKWARDS COMPATIBILITY < 0.15.1
     if not valid:
         valid = verify_deprecated(a, C, secret_msg)

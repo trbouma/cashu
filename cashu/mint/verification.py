@@ -11,6 +11,7 @@ from ..core.base import (
     Unit,
 )
 from ..core.crypto import b_dhke
+from ..core.crypto.keys import derive_private_key_for_amount
 from ..core.crypto.secp import PublicKey
 from ..core.db import Database
 from ..core.errors import (
@@ -102,7 +103,71 @@ class LedgerVerification(
         # Verify output spending conditions
         if outputs and not self._verify_output_spending_conditions(proofs, outputs):
             raise TransactionError("validation of output spending conditions failed.")
+    
+    async def verify_inputs_and_outputs_for_amount(
+        self, *, proofs: List[Proof], outputs: Optional[List[BlindedMessage]] = None
+    ):
+        """Checks all proofs and outputs for validity.
 
+        Args:
+            proofs (List[Proof]): List of proofs to check.
+            outputs (Optional[List[BlindedMessage]], optional): List of outputs to check.
+                Must be provided for a swap but not for a melt. Defaults to None.
+
+        Raises:
+            Exception: Scripts did not validate.
+            Exception: Criteria for provided secrets not met.
+            Exception: Duplicate proofs provided.
+            Exception: BDHKE verification failed.
+        """
+        # Verify inputs
+        # Verify proofs are spendable
+        if not len(await self._get_proofs_spent([p.Y for p in proofs])) == 0:
+            raise TokenAlreadySpentError()
+        # Verify amounts of inputs
+        if not all([self._verify_amount(p.amount) for p in proofs]):
+            raise TransactionError("invalid amount.")
+        # Verify secret criteria
+        if not all([self._verify_secret_criteria(p) for p in proofs]):
+            raise TransactionError("secrets do not match criteria.")
+        # verify that only unique proofs were used
+        if not self._verify_no_duplicate_proofs(proofs):
+            raise TransactionError("duplicate proofs.")
+        # Verify ecash signatures
+        if not all([self._verify_proof_bdhke_for_amount(p, p.amount) for p in proofs]):
+            raise TransactionError("could not verify proofs.")
+        # Verify input spending conditions
+        if not all([self._verify_input_spending_conditions(p) for p in proofs]):
+            raise TransactionError("validation of input spending conditions failed.")
+
+        if outputs is None:
+            # If no outputs are provided, we are melting
+            return
+
+        # Verify input and output amounts
+        self._verify_equation_balanced(proofs, outputs)
+
+        # Verify outputs
+        await self._verify_outputs(outputs)
+
+        # Verify inputs and outputs together
+        if not self._verify_input_output_amounts(proofs, outputs):
+            raise TransactionError("input amounts less than output.")
+        # Verify that input keyset units are the same as output keyset unit
+        # We have previously verified that all outputs have the same keyset id in `_verify_outputs`
+        assert outputs[0].id, "output id not set"
+        if not all(
+            [
+                self.keysets[p.id].unit == self.keysets[outputs[0].id].unit
+                for p in proofs
+            ]
+        ):
+            raise TransactionError("input and output keysets have different units.")
+
+        # Verify output spending conditions
+        if outputs and not self._verify_output_spending_conditions(proofs, outputs):
+            raise TransactionError("validation of output spending conditions failed.")
+        
     async def _verify_outputs(
         self, outputs: List[BlindedMessage], skip_amount_check=False
     ):
@@ -193,7 +258,29 @@ class LedgerVerification(
         )
         # use the appropriate active keyset for this proof.id
         private_key_amount = self.keysets[proof.id].private_keys[proof.amount]
+        
 
+        C = PublicKey(bytes.fromhex(proof.C), raw=True)
+        valid = b_dhke.verify(private_key_amount, C, proof.secret)
+        if valid:
+            logger.trace("Proof verified.")
+        else:
+            logger.trace(f"Proof verification failed for {proof.secret} – {proof.C}.")
+        return valid
+    
+    def _verify_proof_bdhke_for_amount(self, proof: Proof, amount: int) -> bool:
+        """Verifies that the proof of promise was issued by this ledger."""
+        assert proof.id in self.keysets, f"keyset {proof.id} unknown"
+        logger.trace(
+            f"Validating proof {proof.secret} with keyset"
+            f" {self.keysets[proof.id].id}."
+        )
+        # use the appropriate active keyset for this proof.id
+        # TODO Get private key from keyset
+        # private_key_amount = self.keysets[proof.id].private_keys[proof.amount]
+        private_key_amount = derive_private_key_for_amount(self.keysets[proof.id].seed,self.keysets[proof.id].derivation_path,amount)
+        print(f"{self.keysets[proof.id].id} {self.keysets[proof.id].seed}, {self.keysets[proof.id].derivation_path} {proof.amount}")
+        print("public key amount", private_key_amount.pubkey.serialize().hex())
         C = PublicKey(bytes.fromhex(proof.C), raw=True)
         valid = b_dhke.verify(private_key_amount, C, proof.secret)
         if valid:

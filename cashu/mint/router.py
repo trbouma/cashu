@@ -25,6 +25,7 @@ from ..core.models import (
     PostRestoreRequest,
     PostRestoreResponse,
     PostSplitRequest,
+    PostSplitRequestAmount,
     PostSplitResponse,
 )
 from ..core.settings import settings
@@ -443,7 +444,7 @@ async def swap(
 @router.post(
     "/v1/swapforamount",
     name="Swap tokens",
-    summary="Swap inputs for outputs of the same value",
+    summary="Swap input of amount for outputs of the same value",
     response_model=PostSplitResponse,
     response_description=(
         "An array of blinded signatures that can be used to create proofs."
@@ -453,7 +454,7 @@ async def swap(
 @limiter.limit(f"{settings.mint_transaction_rate_limit_per_minute}/minute")
 async def swap_for_amount(
     request: Request,
-    payload: PostSplitRequest,
+    payload: PostSplitRequestAmount,
 ) -> PostSplitResponse:
     """
     Requests a set of Proofs to be split into two a new set of BlindedSignatures.
@@ -464,7 +465,7 @@ async def swap_for_amount(
     logger.trace(f"> POST /v1/swap: {payload}")
     assert payload.outputs, Exception("no outputs provided.")
 
-    signatures = await ledger.split(proofs=payload.inputs, outputs=payload.outputs)
+    signatures = await ledger.split_for_amount(proof=payload.input, outputs=payload.outputs)
 
     return PostSplitResponse(signatures=signatures)
 
