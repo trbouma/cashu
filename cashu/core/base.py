@@ -1,11 +1,14 @@
 import base64
 import json
 import math
-from dataclasses import dataclass
+import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from enum import Enum
 from sqlite3 import Row
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
+import cbor2
 from loguru import logger
 from pydantic import BaseModel, root_validator
 
@@ -78,24 +81,22 @@ class ProofState(LedgerEvent):
     def kind(self) -> JSONRPCSubscriptionKinds:
         return JSONRPCSubscriptionKinds.PROOF_STATE
 
+    @property
+    def unspent(self) -> bool:
+        return self.state == ProofSpentState.unspent
+
+    @property
+    def spent(self) -> bool:
+        return self.state == ProofSpentState.spent
+
+    @property
+    def pending(self) -> bool:
+        return self.state == ProofSpentState.pending
+
 
 class HTLCWitness(BaseModel):
     preimage: Optional[str] = None
-    signature: Optional[str] = None
-
-    @classmethod
-    def from_witness(cls, witness: str):
-        return cls(**json.loads(witness))
-
-
-class P2SHWitness(BaseModel):
-    """
-    Unlocks P2SH spending condition of a Proof
-    """
-
-    script: str
-    signature: str
-    address: Union[str, None] = None
+    signatures: Optional[List[str]] = None
 
     @classmethod
     def from_witness(cls, witness: str):
@@ -134,12 +135,12 @@ class Proof(BaseModel):
     time_created: Union[None, str] = ""
     time_reserved: Union[None, str] = ""
     derivation_path: Union[None, str] = ""  # derivation path of the proof
-    mint_id: Union[
-        None, str
-    ] = None  # holds the id of the mint operation that created this proof
-    melt_id: Union[
-        None, str
-    ] = None  # holds the id of the melt operation that destroyed this proof
+    mint_id: Union[None, str] = (
+        None  # holds the id of the mint operation that created this proof
+    )
+    melt_id: Union[None, str] = (
+        None  # holds the id of the melt operation that destroyed this proof
+    )
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -147,7 +148,10 @@ class Proof(BaseModel):
 
     @classmethod
     def from_dict(cls, proof_dict: dict):
-        if proof_dict.get("dleq") and isinstance(proof_dict["dleq"], str):
+        if proof_dict.get("dleq") and isinstance(proof_dict["dleq"], dict):
+            proof_dict["dleq"] = DLEQWallet(**proof_dict["dleq"])
+        elif proof_dict.get("dleq") and isinstance(proof_dict["dleq"], str):
+            # Proofs read from the database have the DLEQ proof as a string
             proof_dict["dleq"] = DLEQWallet(**json.loads(proof_dict["dleq"]))
         else:
             # overwrite the empty string with None
@@ -189,9 +193,14 @@ class Proof(BaseModel):
         return P2PKWitness.from_witness(self.witness).signatures
 
     @property
-    def htlcpreimage(self) -> Union[str, None]:
+    def htlcpreimage(self) -> str | None:
         assert self.witness, "Witness is missing for htlc preimage"
         return HTLCWitness.from_witness(self.witness).preimage
+
+    @property
+    def htlcsigs(self) -> List[str] | None:
+        assert self.witness, "Witness is missing for htlc signatures"
+        return HTLCWitness.from_witness(self.witness).signatures
 
 
 class Proofs(BaseModel):
@@ -252,20 +261,7 @@ class BlindedSignature(BaseModel):
         )
 
 
-# ------- LIGHTNING INVOICE -------
-
-
-class Invoice(BaseModel):
-    amount: int
-    bolt11: str
-    id: str
-    out: Union[None, bool] = None
-    payment_hash: Union[None, str] = None
-    preimage: Union[str, None] = None
-    issued: Union[None, bool] = False
-    paid: Union[None, bool] = False
-    time_created: Union[None, str, int, float] = ""
-    time_paid: Union[None, str, int, float] = ""
+# ------- Quotes -------
 
 
 class MeltQuoteState(Enum):
@@ -285,14 +281,14 @@ class MeltQuote(LedgerEvent):
     unit: str
     amount: int
     fee_reserve: int
-    paid: bool
     state: MeltQuoteState
     created_time: Union[int, None] = None
     paid_time: Union[int, None] = None
     fee_paid: int = 0
-    payment_preimage: str = ""
+    payment_preimage: Optional[str] = None
     expiry: Optional[int] = None
     change: Optional[List[BlindedSignature]] = None
+    mint: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: Row):
@@ -307,6 +303,8 @@ class MeltQuote(LedgerEvent):
             paid_time = int(row["paid_time"].timestamp()) if row["paid_time"] else None
             expiry = int(row["expiry"].timestamp()) if row["expiry"] else None
 
+        payment_preimage = row.get("payment_preimage") or row.get("proof")  # type: ignore
+
         # parse change from row as json
         change = None
         if row["change"]:
@@ -320,14 +318,37 @@ class MeltQuote(LedgerEvent):
             unit=row["unit"],
             amount=row["amount"],
             fee_reserve=row["fee_reserve"],
-            paid=row["paid"],
-            state=MeltQuoteState[row["state"]],
+            state=MeltQuoteState(row["state"]),
             created_time=created_time,
             paid_time=paid_time,
             fee_paid=row["fee_paid"],
             change=change,
             expiry=expiry,
-            payment_preimage=row["proof"],
+            payment_preimage=payment_preimage,
+        )
+
+    @classmethod
+    def from_resp_wallet(
+        cls, melt_quote_resp, mint: str, amount: int, unit: str, request: str
+    ):
+        # BEGIN: BACKWARDS COMPATIBILITY < 0.16.0: "paid" field to "state"
+        if melt_quote_resp.state is None:
+            if melt_quote_resp.paid is True:
+                melt_quote_resp.state = MeltQuoteState.paid
+            elif melt_quote_resp.paid is False:
+                melt_quote_resp.state = MeltQuoteState.unpaid
+        # END: BACKWARDS COMPATIBILITY < 0.16.0
+        return cls(
+            quote=melt_quote_resp.quote,
+            method="bolt11",
+            request=request,
+            checking_id="",
+            unit=unit,
+            amount=amount,
+            fee_reserve=melt_quote_resp.fee_reserve,
+            state=MeltQuoteState(melt_quote_resp.state),
+            mint=mint,
+            change=melt_quote_resp.change,
         )
 
     @property
@@ -339,15 +360,34 @@ class MeltQuote(LedgerEvent):
     def kind(self) -> JSONRPCSubscriptionKinds:
         return JSONRPCSubscriptionKinds.BOLT11_MELT_QUOTE
 
+    @property
+    def unpaid(self) -> bool:
+        return self.state == MeltQuoteState.unpaid
+
+    @property
+    def pending(self) -> bool:
+        return self.state == MeltQuoteState.pending
+
+    @property
+    def paid(self) -> bool:
+        return self.state == MeltQuoteState.paid
+
     # method that is invoked when the `state` attribute is changed. to protect the state from being set to anything else if the current state is paid
     def __setattr__(self, name, value):
         # an unpaid quote can only be set to pending or paid
-        if name == "state" and self.state == MeltQuoteState.unpaid:
-            if value != MeltQuoteState.pending and value != MeltQuoteState.paid:
-                raise Exception("Cannot change state of an unpaid quote.")
+        if name == "state" and self.unpaid:
+            if value not in [MeltQuoteState.pending, MeltQuoteState.paid]:
+                raise Exception(
+                    f"Cannot change state of an unpaid melt quote to {value}."
+                )
         # a paid quote can not be changed
-        if name == "state" and self.state == MeltQuoteState.paid:
-            raise Exception("Cannot change state of a paid quote.")
+        if name == "state" and self.paid:
+            raise Exception("Cannot change state of a paid melt quote.")
+
+        if name == "paid":
+            raise Exception(
+                "MeltQuote does not support `paid` anymore! Use `state` instead."
+            )
         super().__setattr__(name, value)
 
 
@@ -368,12 +408,11 @@ class MintQuote(LedgerEvent):
     checking_id: str
     unit: str
     amount: int
-    paid: bool
-    issued: bool
     state: MintQuoteState
     created_time: Union[int, None] = None
     paid_time: Union[int, None] = None
     expiry: Optional[int] = None
+    mint: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: Row):
@@ -394,11 +433,31 @@ class MintQuote(LedgerEvent):
             checking_id=row["checking_id"],
             unit=row["unit"],
             amount=row["amount"],
-            paid=row["paid"],
-            issued=row["issued"],
-            state=MintQuoteState[row["state"]],
+            state=MintQuoteState(row["state"]),
             created_time=created_time,
             paid_time=paid_time,
+        )
+
+    @classmethod
+    def from_resp_wallet(cls, mint_quote_resp, mint: str, amount: int, unit: str):
+        # BEGIN: BACKWARDS COMPATIBILITY < 0.16.0: "paid" field to "state"
+        if mint_quote_resp.state is None:
+            if mint_quote_resp.paid is True:
+                mint_quote_resp.state = MintQuoteState.paid
+            elif mint_quote_resp.paid is False:
+                mint_quote_resp.state = MintQuoteState.unpaid
+        # END: BACKWARDS COMPATIBILITY < 0.16.0
+        return cls(
+            quote=mint_quote_resp.quote,
+            method="bolt11",
+            request=mint_quote_resp.request,
+            checking_id="",
+            unit=unit,
+            amount=amount,
+            state=MintQuoteState(mint_quote_resp.state),
+            mint=mint,
+            expiry=mint_quote_resp.expiry,
+            created_time=int(time.time()),
         )
 
     @property
@@ -410,22 +469,45 @@ class MintQuote(LedgerEvent):
     def kind(self) -> JSONRPCSubscriptionKinds:
         return JSONRPCSubscriptionKinds.BOLT11_MINT_QUOTE
 
+    @property
+    def unpaid(self) -> bool:
+        return self.state == MintQuoteState.unpaid
+
+    @property
+    def paid(self) -> bool:
+        return self.state == MintQuoteState.paid
+
+    @property
+    def pending(self) -> bool:
+        return self.state == MintQuoteState.pending
+
+    @property
+    def issued(self) -> bool:
+        return self.state == MintQuoteState.issued
+
     def __setattr__(self, name, value):
         # un unpaid quote can only be set to paid
-        if name == "state" and self.state == MintQuoteState.unpaid:
+        if name == "state" and self.unpaid:
             if value != MintQuoteState.paid:
-                raise Exception("Cannot change state of an unpaid quote.")
+                raise Exception(
+                    f"Cannot change state of an unpaid mint quote to {value}."
+                )
         # a paid quote can only be set to pending or issued
-        if name == "state" and self.state == MintQuoteState.paid:
+        if name == "state" and self.paid:
             if value != MintQuoteState.pending and value != MintQuoteState.issued:
-                raise Exception(f"Cannot change state of a paid quote to {value}.")
+                raise Exception(f"Cannot change state of a paid mint quote to {value}.")
         # a pending quote can only be set to paid or issued
-        if name == "state" and self.state == MintQuoteState.pending:
+        if name == "state" and self.pending:
             if value not in [MintQuoteState.paid, MintQuoteState.issued]:
-                raise Exception("Cannot change state of a pending quote.")
+                raise Exception("Cannot change state of a pending mint quote.")
         # an issued quote cannot be changed
-        if name == "state" and self.state == MintQuoteState.issued:
-            raise Exception("Cannot change state of an issued quote.")
+        if name == "state" and self.issued:
+            raise Exception("Cannot change state of an issued mint quote.")
+
+        if name == "paid":
+            raise Exception(
+                "MintQuote does not support `paid` anymore! Use `state` instead."
+            )
         super().__setattr__(name, value)
 
 
@@ -719,6 +801,13 @@ class MintKeyset:
         assert self.seed, "seed not set"
         assert self.derivation_path, "derivation path not set"
 
+        # BEGIN: BACKWARDS COMPATIBILITY < 0.15.0
+        # we overwrite keyset id only if it isn't already set in the database
+        # loaded from the database. This is to allow for backwards compatibility
+        # with old keysets with new id's and vice versa. This code and successive
+        # `id_in_db or` parts can be removed if there are only new keysets in the mint (> 0.15.0)
+        id_in_db = self.id
+
         if self.version_tuple < (0, 12):
             # WARNING: Broken key derivation for backwards compatibility with < 0.12
             self.private_keys = derive_keys_backwards_compatible_insecure_pre_0_12(
@@ -729,7 +818,7 @@ class MintKeyset:
                 f"WARNING: Using weak key derivation for keyset {self.id} (backwards"
                 " compatibility < 0.12)"
             )
-            self.id = derive_keyset_id_deprecated(self.public_keys)  # type: ignore
+            self.id = id_in_db or derive_keyset_id_deprecated(self.public_keys)  # type: ignore
         elif self.version_tuple < (0, 15):
             self.private_keys = derive_keys_sha256(self.seed, self.derivation_path)
             logger.trace(
@@ -737,51 +826,48 @@ class MintKeyset:
                 " compatibility < 0.15)"
             )
             self.public_keys = derive_pubkeys(self.private_keys)  # type: ignore
-            self.id = derive_keyset_id_deprecated(self.public_keys)  # type: ignore
+            self.id = id_in_db or derive_keyset_id_deprecated(self.public_keys)  # type: ignore
         else:
             self.private_keys = derive_keys(self.seed, self.derivation_path)
             self.public_keys = derive_pubkeys(self.private_keys)  # type: ignore
-            self.id = derive_keyset_id(self.public_keys)  # type: ignore
+            self.id = id_in_db or derive_keyset_id(self.public_keys)  # type: ignore
 
 
 # ------- TOKEN -------
 
 
-class TokenV1(BaseModel):
-    """
-    A (legacy) Cashu token that includes proofs. This can only be received if the receiver knows the mint associated with the
-    keyset ids of the proofs.
-    """
+class Token(ABC):
+    @property
+    @abstractmethod
+    def proofs(self) -> List[Proof]: ...
 
-    # NOTE: not used in Pydantic validation
-    __root__: List[Proof]
+    @property
+    @abstractmethod
+    def amount(self) -> int: ...
 
+    @property
+    @abstractmethod
+    def mint(self) -> str: ...
 
-class TokenV2Mint(BaseModel):
-    """
-    Object that describes how to reach the mints associated with the proofs in a TokenV2 object.
-    """
+    @property
+    @abstractmethod
+    def keysets(self) -> List[str]: ...
 
-    url: str  # mint URL
-    ids: List[str]  # List of keyset id's that are from this mint
+    @property
+    @abstractmethod
+    def memo(self) -> Optional[str]: ...
 
+    @memo.setter
+    @abstractmethod
+    def memo(self, memo: Optional[str]): ...
 
-class TokenV2(BaseModel):
-    """
-    A Cashu token that includes proofs and their respective mints. Can include proofs from multiple different mints and keysets.
-    """
+    @property
+    @abstractmethod
+    def unit(self) -> str: ...
 
-    proofs: List[Proof]
-    mints: Optional[List[TokenV2Mint]] = None
-
-    def to_dict(self):
-        if self.mints:
-            return dict(
-                proofs=[p.to_dict() for p in self.proofs],
-                mints=[m.dict() for m in self.mints],
-            )
-        else:
-            return dict(proofs=[p.to_dict() for p in self.proofs])
+    @unit.setter
+    @abstractmethod
+    def unit(self, unit: str): ...
 
 
 class TokenV3Token(BaseModel):
@@ -795,34 +881,61 @@ class TokenV3Token(BaseModel):
         return return_dict
 
 
-class TokenV3(BaseModel):
+@dataclass
+class TokenV3(Token):
     """
     A Cashu token that includes proofs and their respective mints. Can include proofs from multiple different mints and keysets.
     """
 
-    token: List[TokenV3Token] = []
-    memo: Optional[str] = None
-    unit: Optional[str] = None
+    token: List[TokenV3Token] = field(default_factory=list)
+    _memo: Optional[str] = None
+    _unit: str = "sat"
 
-    def to_dict(self, include_dleq=False):
+    class Config:
+        allow_population_by_field_name = True
+
+    @property
+    def proofs(self) -> List[Proof]:
+        return [proof for token in self.token for proof in token.proofs]
+
+    @property
+    def amount(self) -> int:
+        return sum([p.amount for p in self.proofs])
+
+    @property
+    def keysets(self) -> List[str]:
+        return list({p.id for p in self.proofs})
+
+    @property
+    def mint(self) -> str:
+        return self.mints[0]
+
+    @property
+    def mints(self) -> List[str]:
+        return list({t.mint for t in self.token if t.mint})
+
+    @property
+    def memo(self) -> Optional[str]:
+        return str(self._memo) if self._memo else None
+
+    @memo.setter
+    def memo(self, memo: Optional[str]):
+        self._memo = memo
+
+    @property
+    def unit(self) -> str:
+        return self._unit
+
+    @unit.setter
+    def unit(self, unit: str):
+        self._unit = unit
+
+    def serialize_to_dict(self, include_dleq=False):
         return_dict = dict(token=[t.to_dict(include_dleq) for t in self.token])
         if self.memo:
             return_dict.update(dict(memo=self.memo))  # type: ignore
-        if self.unit:
-            return_dict.update(dict(unit=self.unit))  # type: ignore
+        return_dict.update(dict(unit=self.unit))  # type: ignore
         return return_dict
-
-    def get_proofs(self):
-        return [proof for token in self.token for proof in token.proofs]
-
-    def get_amount(self):
-        return sum([p.amount for p in self.get_proofs()])
-
-    def get_keysets(self):
-        return list(set([p.id for p in self.get_proofs()]))
-
-    def get_mints(self):
-        return list(set([t.mint for t in self.token if t.mint]))
 
     @classmethod
     def deserialize(cls, tokenv3_serialized: str) -> "TokenV3":
@@ -848,6 +961,279 @@ class TokenV3(BaseModel):
         tokenv3_serialized = prefix
         # encode the token as a base64 string
         tokenv3_serialized += base64.urlsafe_b64encode(
-            json.dumps(self.to_dict(include_dleq)).encode()
+            json.dumps(
+                self.serialize_to_dict(include_dleq), separators=(",", ":")
+            ).encode()
         ).decode()
+        # remove padding
+        tokenv3_serialized = tokenv3_serialized.rstrip("=")
         return tokenv3_serialized
+
+    @classmethod
+    def parse_obj(cls, token_dict: Dict[str, Any]):
+        if not token_dict.get("token"):
+            raise Exception("Token must contain proofs.")
+        token: List[Dict[str, Any]] = token_dict.get("token") or []
+        assert token, "Token must contain proofs."
+        return cls(
+            token=[
+                TokenV3Token(
+                    mint=t.get("mint"),
+                    proofs=[Proof.from_dict(p) for p in t.get("proofs") or []],
+                )
+                for t in token
+            ],
+            _memo=token_dict.get("memo"),
+            _unit=token_dict.get("unit") or "sat",
+        )
+
+
+class TokenV4DLEQ(BaseModel):
+    """
+    Discrete Log Equality (DLEQ) Proof
+    """
+
+    e: bytes
+    s: bytes
+    r: bytes
+
+
+class TokenV4Proof(BaseModel):
+    """
+    Value token
+    """
+
+    a: int
+    s: str  # secret
+    c: bytes  # signature
+    d: Optional[TokenV4DLEQ] = None  # DLEQ proof
+    w: Optional[str] = None  # witness
+
+    @classmethod
+    def from_proof(cls, proof: Proof, include_dleq=False):
+        return cls(
+            a=proof.amount,
+            s=proof.secret,
+            c=bytes.fromhex(proof.C),
+            d=(
+                TokenV4DLEQ(
+                    e=bytes.fromhex(proof.dleq.e),
+                    s=bytes.fromhex(proof.dleq.s),
+                    r=bytes.fromhex(proof.dleq.r),
+                )
+                if proof.dleq
+                else None
+            ),
+            w=proof.witness,
+        )
+
+
+class TokenV4Token(BaseModel):
+    # keyset ID
+    i: bytes
+    # proofs
+    p: List[TokenV4Proof]
+
+
+@dataclass
+class TokenV4(Token):
+    # mint URL
+    m: str
+    # unit
+    u: str
+    # tokens
+    t: List[TokenV4Token]
+    # memo
+    d: Optional[str] = None
+
+    @property
+    def mint(self) -> str:
+        return self.m
+
+    def set_mint(self, mint: str):
+        self.m = mint
+
+    @property
+    def memo(self) -> Optional[str]:
+        return self.d
+
+    @memo.setter
+    def memo(self, memo: Optional[str]):
+        self.d = memo
+
+    @property
+    def unit(self) -> str:
+        return self.u
+
+    @unit.setter
+    def unit(self, unit: str):
+        self.u = unit
+
+    @property
+    def amounts(self) -> List[int]:
+        return [p.a for token in self.t for p in token.p]
+
+    @property
+    def amount(self) -> int:
+        return sum(self.amounts)
+
+    @property
+    def proofs(self) -> List[Proof]:
+        return [
+            Proof(
+                id=token.i.hex(),
+                amount=p.a,
+                secret=p.s,
+                C=p.c.hex(),
+                dleq=(
+                    DLEQWallet(
+                        e=p.d.e.hex(),
+                        s=p.d.s.hex(),
+                        r=p.d.r.hex(),
+                    )
+                    if p.d
+                    else None
+                ),
+                witness=p.w,
+            )
+            for token in self.t
+            for p in token.p
+        ]
+
+    @property
+    def keysets(self) -> List[str]:
+        return list({p.i.hex() for p in self.t})
+
+    @classmethod
+    def from_tokenv3(cls, tokenv3: TokenV3):
+        if not len(tokenv3.mints) == 1:
+            raise Exception("TokenV3 must contain proofs from only one mint.")
+
+        proofs = tokenv3.proofs
+        proofs_by_id: Dict[str, List[Proof]] = {}
+        for proof in proofs:
+            proofs_by_id.setdefault(proof.id, []).append(proof)
+
+        cls.t = []
+        for keyset_id, proofs in proofs_by_id.items():
+            cls.t.append(
+                TokenV4Token(
+                    i=bytes.fromhex(keyset_id),
+                    p=[
+                        TokenV4Proof(
+                            a=p.amount,
+                            s=p.secret,
+                            c=bytes.fromhex(p.C),
+                            d=(
+                                TokenV4DLEQ(
+                                    e=bytes.fromhex(p.dleq.e),
+                                    s=bytes.fromhex(p.dleq.s),
+                                    r=bytes.fromhex(p.dleq.r),
+                                )
+                                if p.dleq
+                                else None
+                            ),
+                            w=p.witness,
+                        )
+                        for p in proofs
+                    ],
+                )
+            )
+
+        # set memo
+        cls.d = tokenv3.memo
+        # set mint
+        cls.m = tokenv3.mint
+        # set unit
+        cls.u = tokenv3.unit or "sat"
+        return cls(t=cls.t, d=cls.d, m=cls.m, u=cls.u)
+
+    def serialize_to_dict(self, include_dleq=False):
+        return_dict: Dict[str, Any] = dict(t=[t.dict() for t in self.t])
+        # strip dleq if needed
+        if not include_dleq:
+            for token in return_dict["t"]:
+                for proof in token["p"]:
+                    if "d" in proof:
+                        del proof["d"]
+        # strip witness if not present
+        for token in return_dict["t"]:
+            for proof in token["p"]:
+                if not proof.get("w"):
+                    del proof["w"]
+        # optional memo
+        if self.d:
+            return_dict.update(dict(d=self.d))
+        # mint
+        return_dict.update(dict(m=self.m))
+        # unit
+        return_dict.update(dict(u=self.u))
+        return return_dict
+
+    def serialize(self, include_dleq=False) -> str:
+        """
+        Takes a TokenV4 and serializes it as "cashuB<cbor_urlsafe_base64>.
+        """
+        prefix = "cashuB"
+        tokenv4_serialized = prefix
+        # encode the token as a base64 string
+        tokenv4_serialized += base64.urlsafe_b64encode(
+            cbor2.dumps(self.serialize_to_dict(include_dleq))
+        ).decode()
+        # remove padding
+        tokenv4_serialized = tokenv4_serialized.rstrip("=")
+        return tokenv4_serialized
+
+    @classmethod
+    def deserialize(cls, tokenv4_serialized: str) -> "TokenV4":
+        """
+        Ingesta a serialized "cashuB<cbor_urlsafe_base64>" token and returns a TokenV4.
+        """
+        prefix = "cashuB"
+        assert tokenv4_serialized.startswith(prefix), Exception(
+            f"Token prefix not valid. Expected {prefix}."
+        )
+        token_base64 = tokenv4_serialized[len(prefix) :]
+        # if base64 string is not a multiple of 4, pad it with "="
+        token_base64 += "=" * (4 - len(token_base64) % 4)
+
+        token = cbor2.loads(base64.urlsafe_b64decode(token_base64))
+        return cls.parse_obj(token)
+
+    def to_tokenv3(self) -> TokenV3:
+        tokenv3 = TokenV3(_memo=self.d, _unit=self.u)
+        for token in self.t:
+            tokenv3.token.append(
+                TokenV3Token(
+                    mint=self.m,
+                    proofs=[
+                        Proof(
+                            id=token.i.hex(),
+                            amount=p.a,
+                            secret=p.s,
+                            C=p.c.hex(),
+                            dleq=(
+                                DLEQWallet(
+                                    e=p.d.e.hex(),
+                                    s=p.d.s.hex(),
+                                    r=p.d.r.hex(),
+                                )
+                                if p.d
+                                else None
+                            ),
+                            witness=p.w,
+                        )
+                        for p in token.p
+                    ],
+                )
+            )
+        return tokenv3
+
+    @classmethod
+    def parse_obj(cls, token_dict: dict):
+        return cls(
+            m=token_dict["m"],
+            u=token_dict["u"],
+            t=[TokenV4Token(**t) for t in token_dict["t"]],
+            d=token_dict.get("d", None),
+        )

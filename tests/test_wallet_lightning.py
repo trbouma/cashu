@@ -1,5 +1,6 @@
 from typing import List, Union
 
+import bolt11
 import pytest
 import pytest_asyncio
 
@@ -7,7 +8,13 @@ from cashu.core.base import Proof
 from cashu.core.errors import CashuError
 from cashu.wallet.lightning import LightningWallet
 from tests.conftest import SERVER_ENDPOINT
-from tests.helpers import get_real_invoice, is_fake, is_regtest, pay_if_regtest
+from tests.helpers import (
+    get_real_invoice,
+    is_deprecated_api_only,
+    is_fake,
+    is_regtest,
+    pay_if_regtest,
+)
 
 
 async def assert_err(f, msg: Union[str, CashuError]):
@@ -59,14 +66,23 @@ async def test_create_invoice(wallet: LightningWallet):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(is_deprecated_api_only, reason="only works with v1 API")
+async def test_create_invoice_with_description(wallet: LightningWallet):
+    invoice = await wallet.create_invoice(64, "test description")
+    assert invoice.payment_request
+    assert invoice.payment_request.startswith("ln")
+    invoiceObj = bolt11.decode(invoice.payment_request)
+    assert invoiceObj.description == "test description"
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(is_regtest, reason="only works with FakeWallet")
 async def test_check_invoice_internal(wallet: LightningWallet):
     # fill wallet
     invoice = await wallet.create_invoice(64)
     assert invoice.payment_request
-    assert invoice.checking_id
-    status = await wallet.get_invoice_status(invoice.checking_id)
-    assert status.paid
+    status = await wallet.get_invoice_status(invoice.payment_request)
+    assert status.settled
 
 
 @pytest.mark.asyncio
@@ -75,12 +91,11 @@ async def test_check_invoice_external(wallet: LightningWallet):
     # fill wallet
     invoice = await wallet.create_invoice(64)
     assert invoice.payment_request
-    assert invoice.checking_id
-    status = await wallet.get_invoice_status(invoice.checking_id)
-    assert not status.paid
-    pay_if_regtest(invoice.payment_request)
-    status = await wallet.get_invoice_status(invoice.checking_id)
-    assert status.paid
+    status = await wallet.get_invoice_status(invoice.payment_request)
+    assert not status.settled
+    await pay_if_regtest(invoice.payment_request)
+    status = await wallet.get_invoice_status(invoice.payment_request)
+    assert status.settled
 
 
 @pytest.mark.asyncio
@@ -89,8 +104,7 @@ async def test_pay_invoice_internal(wallet: LightningWallet):
     # fill wallet
     invoice = await wallet.create_invoice(64)
     assert invoice.payment_request
-    assert invoice.checking_id
-    await wallet.get_invoice_status(invoice.checking_id)
+    await wallet.get_invoice_status(invoice.payment_request)
     assert wallet.available_balance >= 64
 
     # pay invoice
@@ -98,12 +112,11 @@ async def test_pay_invoice_internal(wallet: LightningWallet):
     assert invoice2.payment_request
     status = await wallet.pay_invoice(invoice2.payment_request)
 
-    assert status.ok
+    assert status.settled
 
     # check payment
-    assert invoice2.checking_id
-    status = await wallet.get_payment_status(invoice2.checking_id)
-    assert status.paid
+    status = await wallet.get_payment_status(invoice2.payment_request)
+    assert status.settled
 
 
 @pytest.mark.asyncio
@@ -112,19 +125,16 @@ async def test_pay_invoice_external(wallet: LightningWallet):
     # fill wallet
     invoice = await wallet.create_invoice(64)
     assert invoice.payment_request
-    assert invoice.checking_id
-    pay_if_regtest(invoice.payment_request)
-    status = await wallet.get_invoice_status(invoice.checking_id)
-    assert status.paid
+    await pay_if_regtest(invoice.payment_request)
+    status = await wallet.get_invoice_status(invoice.payment_request)
+    assert status.settled
     assert wallet.available_balance >= 64
 
     # pay invoice
     invoice_real = get_real_invoice(16)
     status = await wallet.pay_invoice(invoice_real["payment_request"])
 
-    assert status.ok
+    assert status.settled
 
-    # check payment
-    assert status.checking_id
-    status = await wallet.get_payment_status(status.checking_id)
-    assert status.paid
+    # check payment)
+    assert status.settled

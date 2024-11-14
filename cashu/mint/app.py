@@ -12,6 +12,7 @@ from ..core.logging import configure_logger
 from ..core.settings import settings
 from .router import router
 from .router_deprecated import router_deprecated
+from .startup import shutdown_mint as shutdown_mint_init
 from .startup import start_mint_init
 
 if settings.debug_profiling:
@@ -90,7 +91,7 @@ async def catch_exceptions(request: Request, call_next):
 
 
 # Add exception handlers
-app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
+app.add_exception_handler(RequestValidationError, request_validation_exception_handler)  # type: ignore
 
 # Add routers
 if settings.debug_mint_only_deprecated:
@@ -103,3 +104,8 @@ else:
 @app.on_event("startup")
 async def startup_mint():
     await start_mint_init()
+
+
+@app.on_event("shutdown")
+async def shutdown_mint():
+    await shutdown_mint_init()

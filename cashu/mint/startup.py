@@ -34,6 +34,7 @@ for key, value in settings.dict().items():
         "mint_lnd_rest_admin_macaroon",
         "mint_lnd_rest_invoice_macaroon",
         "mint_corelightning_rest_macaroon",
+        "mint_clnrest_rune",
     ]:
         value = "********" if value is not None else None
 
@@ -85,7 +86,7 @@ async def rotate_keys(n_seconds=60):
         i += 1
         logger.info("Rotating keys.")
         incremented_derivation_path = (
-            "/".join(ledger.derivation_path.split("/")[:-1]) + f"/{i}"
+            f"{'/'.join(ledger.derivation_path.split('/')[:-1])}/{i}"
         )
         await ledger.activate_keyset(derivation_path=incremented_derivation_path)
         logger.info(f"Current keyset: {ledger.keyset.id}")
@@ -97,3 +98,9 @@ async def start_mint_init():
     await ledger.startup_ledger()
     logger.info("Mint started.")
     # asyncio.create_task(rotate_keys())
+
+
+async def shutdown_mint():
+    await ledger.shutdown_ledger()
+    logger.info("Mint shutdown.")
+    logger.remove()

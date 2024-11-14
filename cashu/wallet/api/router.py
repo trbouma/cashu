@@ -8,7 +8,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Query
 
-from ...core.base import TokenV3
+from ...core.base import Token, TokenV3
 from ...core.helpers import sum_proofs
 from ...core.settings import settings
 from ...lightning.base import (
@@ -19,7 +19,11 @@ from ...lightning.base import (
 )
 from ...nostr.client.client import NostrClient
 from ...tor.tor import TorProxy
-from ...wallet.crud import get_lightning_invoices, get_reserved_proofs
+from ...wallet.crud import (
+    get_bolt11_melt_quotes,
+    get_bolt11_mint_quotes,
+    get_reserved_proofs,
+)
 from ...wallet.helpers import (
     deserialize_token_from_string,
     init_wallet,
@@ -141,7 +145,7 @@ async def create_invoice(
     response_model=PaymentStatus,
 )
 async def invoice_state(
-    payment_hash: str = Query(default=None, description="Payment hash of paid invoice"),
+    payment_request: str = Query(default=None, description="Payment request to check"),
     mint: str = Query(
         default=None,
         description="Mint URL to create an invoice at (None for default mint)",
@@ -150,7 +154,7 @@ async def invoice_state(
     global wallet
     if mint:
         wallet = await mint_wallet(mint)
-    state = await wallet.get_invoice_status(payment_hash)
+    state = await wallet.get_invoice_status(payment_request)
     return state
 
 
@@ -185,30 +189,30 @@ async def swap(
         raise Exception("mints for swap have to be different")
 
     # request invoice from incoming mint
-    invoice = await incoming_wallet.request_mint(amount)
+    mint_quote = await incoming_wallet.request_mint(amount)
 
     # pay invoice from outgoing mint
     await outgoing_wallet.load_proofs(reload=True)
-    quote = await outgoing_wallet.melt_quote(invoice.bolt11)
+    quote = await outgoing_wallet.melt_quote(mint_quote.request)
     total_amount = quote.amount + quote.fee_reserve
     if outgoing_wallet.available_balance < total_amount:
         raise Exception("balance too low")
 
-    _, send_proofs = await outgoing_wallet.split_to_send(
+    _, send_proofs = await outgoing_wallet.swap_to_send(
         outgoing_wallet.proofs, total_amount, set_reserved=True
     )
     await outgoing_wallet.melt(
-        send_proofs, invoice.bolt11, quote.fee_reserve, quote.quote
+        send_proofs, mint_quote.request, quote.fee_reserve, quote.quote
     )
 
     # mint token in incoming mint
-    await incoming_wallet.mint(amount, id=invoice.id)
+    await incoming_wallet.mint(amount, quote_id=mint_quote.quote)
     await incoming_wallet.load_proofs(reload=True)
     mint_balances = await incoming_wallet.balance_per_minturl()
     return SwapResponse(
         outgoing_mint=outgoing_mint,
         incoming_mint=incoming_mint,
-        invoice=invoice,
+        mint_quote=mint_quote,
         balances=mint_balances,
     )
 
@@ -261,7 +265,7 @@ async def receive_command(
     wallet = await mint_wallet()
     initial_balance = wallet.available_balance
     if token:
-        tokenObj: TokenV3 = deserialize_token_from_string(token)
+        tokenObj: Token = deserialize_token_from_string(token)
         await verify_mints(wallet, tokenObj)
         await receive(wallet, tokenObj)
     elif nostr:
@@ -317,7 +321,7 @@ async def burn(
     else:
         # check only the specified ones
         tokenObj = TokenV3.deserialize(token)
-        proofs = tokenObj.get_proofs()
+        proofs = tokenObj.proofs
 
     if delete:
         await wallet.invalidate(proofs)
@@ -352,7 +356,7 @@ async def pending(
             grouped_proofs = list(value)
             token = await wallet.serialize_proofs(grouped_proofs)
             tokenObj = deserialize_token_from_string(token)
-            mint = [t.mint for t in tokenObj.token if t.mint][0]
+            mint = tokenObj.mint
             reserved_date = datetime.utcfromtimestamp(
                 int(grouped_proofs[0].time_reserved)  # type: ignore
             ).strftime("%Y-%m-%d %H:%M:%S")
@@ -386,8 +390,9 @@ async def locks():
     "/invoices", name="List all pending invoices", response_model=InvoicesResponse
 )
 async def invoices():
-    invoices = await get_lightning_invoices(db=wallet.db)
-    return InvoicesResponse(invoices=invoices)
+    mint_quotes = await get_bolt11_mint_quotes(db=wallet.db)
+    melt_quotes = await get_bolt11_melt_quotes(db=wallet.db)
+    return InvoicesResponse(mint_quotes=mint_quotes, melt_quotes=melt_quotes)
 
 
 @router.get(
@@ -433,7 +438,7 @@ async def restore(
     if to < 0:
         raise Exception("Counter must be positive")
     await wallet.load_mint()
-    await wallet.restore_promises_from_to(0, to)
+    await wallet.restore_promises_from_to(wallet.keyset_id, 0, to)
     await wallet.invalidate(wallet.proofs, check_spendable=True)
     return RestoreResponse(balance=wallet.available_balance)
 

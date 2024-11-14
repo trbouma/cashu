@@ -1,29 +1,36 @@
+import base64
 import copy
 import threading
 import time
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
-import bolt11
 from bip32 import BIP32
 from loguru import logger
-
-from cashu.core.json_rpc.base import JSONRPCSubscriptionKinds
 
 from ..core.base import (
     BlindedMessage,
     BlindedSignature,
     DLEQWallet,
-    Invoice,
+    MeltQuote,
+    MeltQuoteState,
+    MintQuote,
+    MintQuoteState,
     Proof,
-    ProofSpentState,
     Unit,
     WalletKeyset,
 )
 from ..core.crypto import b_dhke
+from ..core.crypto.keys import derive_keyset_id
 from ..core.crypto.secp import PrivateKey, PublicKey
 from ..core.db import Database
 from ..core.errors import KeysetNotFoundError
-from ..core.helpers import amount_summary, calculate_number_of_blank_outputs, sum_proofs
+from ..core.helpers import (
+    amount_summary,
+    calculate_number_of_blank_outputs,
+    sum_promises,
+    sum_proofs,
+)
+from ..core.json_rpc.base import JSONRPCSubscriptionKinds
 from ..core.migrations import migrate_databases
 from ..core.models import (
     PostCheckStateResponse,
@@ -32,21 +39,23 @@ from ..core.models import (
 from ..core.p2pk import Secret
 from ..core.settings import settings
 from ..core.split import amount_split
-from ..wallet.crud import (
+from . import migrations
+from .crud import (
     bump_secret_derivation,
     get_keysets,
     get_proofs,
     invalidate_proof,
     secret_used,
     set_secret_derivation,
+    store_bolt11_melt_quote,
+    store_bolt11_mint_quote,
     store_keyset,
-    store_lightning_invoice,
     store_proof,
+    update_bolt11_melt_quote,
+    update_bolt11_mint_quote,
     update_keyset,
-    update_lightning_invoice,
     update_proof,
 )
-from . import migrations
 from .htlc import WalletHTLC
 from .mint_info import MintInfo
 from .p2pk import WalletP2PK
@@ -54,6 +63,7 @@ from .proofs import WalletProofs
 from .secrets import WalletSecrets
 from .subscriptions import SubscriptionManager
 from .transactions import WalletTransactions
+from .utils import sanitize_url
 from .v1_api import LedgerAPI
 
 
@@ -83,7 +93,7 @@ class Wallet(
     """
 
     keyset_id: str  # holds current keyset id
-    keysets: Dict[str, WalletKeyset]  # holds keysets
+    keysets: Dict[str, WalletKeyset] = {}  # holds keysets
     # mint_keyset_ids: List[str]  # holds active keyset ids of the mint
     unit: Unit
     mint_info: MintInfo  # holds info about mint
@@ -93,18 +103,19 @@ class Wallet(
     bip32: BIP32
     # private_key: Optional[PrivateKey] = None
 
-    def __init__(self, url: str, db: str, name: str = "no_name", unit: str = "sat"):
+    def __init__(self, url: str, db: str, name: str = "wallet", unit: str = "sat"):
         """A Cashu wallet.
 
         Args:
             url (str): URL of the mint.
             db (str): Path to the database directory.
-            name (str, optional): Name of the wallet database file. Defaults to "no_name".
+            name (str, optional): Name of the wallet database file. Defaults to "wallet".
         """
         self.db = Database("wallet", db)
         self.proofs: List[Proof] = []
         self.name = name
         self.unit = Unit[unit]
+        url = sanitize_url(url)
 
         super().__init__(url=url, db=self.db)
         logger.debug("Wallet initialized")
@@ -117,18 +128,22 @@ class Wallet(
         cls,
         url: str,
         db: str,
-        name: str = "no_name",
+        name: str = "wallet",
         skip_db_read: bool = False,
         unit: str = "sat",
+        load_all_keysets: bool = False,
     ):
         """Initializes a wallet with a database and initializes the private key.
 
         Args:
             url (str): URL of the mint.
             db (str): Path to the database.
-            name (str, optional): Name of the wallet. Defaults to "no_name".
+            name (str, optional): Name of the wallet. Defaults to "wallet".
             skip_db_read (bool, optional): If true, values from db like private key and
                 keysets are not loaded. Useful for running only migrations and returning.
+                Defaults to False.
+            unit (str, optional): Unit of the wallet. Defaults to "sat".
+            load_all_keysets (bool, optional): If true, all keysets are loaded from the database.
                 Defaults to False.
 
         Returns:
@@ -137,16 +152,22 @@ class Wallet(
         logger.trace(f"Initializing wallet with database: {db}")
         self = cls(url=url, db=db, name=name, unit=unit)
         await self._migrate_database()
-        if not skip_db_read:
-            logger.trace("Mint init: loading private key and keysets from db.")
-            await self._init_private_key()
-            keysets_list = await get_keysets(mint_url=url, db=self.db)
+
+        if skip_db_read:
+            return self
+
+        logger.trace("Mint init: loading private key and keysets from db.")
+        await self._init_private_key()
+        keysets_list = await get_keysets(
+            mint_url=url if not load_all_keysets else None, db=self.db
+        )
+        if not load_all_keysets:
             keysets_active_unit = [k for k in keysets_list if k.unit == self.unit]
             self.keysets = {k.id: k for k in keysets_active_unit}
-            logger.debug(
-                f"Loaded keysets: {' '.join([k.id + f' {k.unit}' for k in keysets_active_unit])}"
-            )
-
+        else:
+            self.keysets = {k.id: k for k in keysets_list}
+        keysets_str = " ".join([f"{i} {k.unit}" for i, k in self.keysets.items()])
+        logger.debug(f"Loaded keysets: {keysets_str}")
         return self
 
     async def _migrate_database(self):
@@ -165,7 +186,7 @@ class Wallet(
         logger.debug(f"Mint info: {self.mint_info}")
         return self.mint_info
 
-    async def load_mint_keysets(self):
+    async def load_mint_keysets(self, force_old_keysets=False):
         """Loads all keyset of the mint and makes sure we have them all in the database.
 
         Then loads all keysets from the database for the active mint and active unit into self.keysets.
@@ -173,7 +194,6 @@ class Wallet(
         logger.trace("Loading mint keysets.")
         mint_keysets_resp = await self._get_keysets()
         mint_keysets_dict = {k.id: k for k in mint_keysets_resp}
-
         # load all keysets of thisd mint from the db
         keysets_in_db = await get_keysets(mint_url=self.url, db=self.db)
 
@@ -200,10 +220,14 @@ class Wallet(
                 await store_keyset(keyset=wallet_keyset, db=self.db)
 
         for mint_keyset in mint_keysets_dict.values():
-            # if the active or the fee attributes have changed, update them in the database
+            # if the active flag changes from active to inactive
+            # or the fee attributes have changed, update them in the database
             if mint_keyset.id in keysets_in_db_dict:
                 changed = False
-                if mint_keyset.active != keysets_in_db_dict[mint_keyset.id].active:
+                if (
+                    not mint_keyset.active
+                    and mint_keyset.active != keysets_in_db_dict[mint_keyset.id].active
+                ):
                     keysets_in_db_dict[mint_keyset.id].active = mint_keyset.active
                     changed = True
                 if (
@@ -220,7 +244,42 @@ class Wallet(
                         keyset=keysets_in_db_dict[mint_keyset.id], db=self.db
                     )
 
+        await self.inactivate_base64_keysets(force_old_keysets)
+
         await self.load_keysets_from_db()
+
+    async def inactivate_base64_keysets(self, force_old_keysets: bool) -> None:
+        # BEGIN backwards compatibility: phase out keysets with base64 ID by treating them as inactive
+        if settings.wallet_inactivate_base64_keysets and not force_old_keysets:
+            keysets_in_db = await get_keysets(mint_url=self.url, db=self.db)
+            for keyset in keysets_in_db:
+                if not keyset.active:
+                    continue
+                # test if the keyset id is a hex string, if not it's base64
+                try:
+                    int(keyset.id, 16)
+                except ValueError:
+                    # verify that it's base64
+                    try:
+                        _ = base64.b64decode(keyset.id)
+                    except ValueError:
+                        logger.error("Unexpected: keyset id is neither hex nor base64.")
+                        continue
+
+                    # verify that we have a hex version of the same keyset by comparing public keys
+                    hex_keyset_id = derive_keyset_id(keys=keyset.public_keys)
+                    if hex_keyset_id not in [k.id for k in keysets_in_db]:
+                        logger.warning(
+                            f"Keyset {keyset.id} is base64 but we don't have a hex version. Ignoring."
+                        )
+                        continue
+
+                    logger.warning(
+                        f"Keyset {keyset.id} is base64 and has a hex counterpart, setting inactive."
+                    )
+                    keyset.active = False
+                    await update_keyset(keyset=keyset, db=self.db)
+        # END backwards compatibility
 
     async def activate_keyset(self, keyset_id: Optional[str] = None) -> None:
         """Activates a keyset by setting self.keyset_id. Either activates a specific keyset
@@ -257,16 +316,23 @@ class Wallet(
 
             self.keyset_id = chosen_keyset.id
 
-        logger.debug(f"Activated keyset {self.keyset_id}")
+        logger.debug(
+            f"Activated keyset {self.keyset_id} ({self.keysets[self.keyset_id].unit}) fee: {self.keysets[self.keyset_id].input_fee_ppk}"
+        )
 
-    async def load_mint(self, keyset_id: str = "") -> None:
+    async def load_mint(self, keyset_id: str = "", force_old_keysets=False) -> None:
         """
         Loads the public keys of the mint. Either gets the keys for the specified
         `keyset_id` or gets the keys of the active keyset from the mint.
         Gets the active keyset ids of the mint and stores in `self.mint_keyset_ids`.
+
+        Args:
+            keyset_id (str, optional): Keyset id to load. Defaults to "".
+            force_old_keysets (bool, optional): If true, old deprecated base64 keysets are not ignored. This is necessary for restoring tokens from old base64 keysets.
+                Defaults to False.
         """
         logger.trace("Loading mint.")
-        await self.load_mint_keysets()
+        await self.load_mint_keysets(force_old_keysets)
         await self.activate_keyset(keyset_id)
         try:
             await self.load_mint_info()
@@ -274,7 +340,7 @@ class Wallet(
             logger.debug(f"Could not load mint info: {e}")
             pass
 
-    async def load_proofs(self, reload: bool = False) -> None:
+    async def load_proofs(self, reload: bool = False, all_keysets=False) -> None:
         """Load all proofs of the selected mint and unit (i.e. self.keysets) into memory."""
 
         if self.proofs and not reload:
@@ -284,12 +350,15 @@ class Wallet(
         self.proofs = []
         await self.load_keysets_from_db()
         async with self.db.connect() as conn:
-            for keyset_id in self.keysets:
-                proofs = await get_proofs(db=self.db, id=keyset_id, conn=conn)
+            if all_keysets:
+                proofs = await get_proofs(db=self.db, conn=conn)
                 self.proofs.extend(proofs)
-        logger.trace(
-            f"Proofs loaded for keysets: {' '.join([k.id + f' ({k.unit})' for k in self.keysets.values()])}"
-        )
+            else:
+                for keyset_id in self.keysets:
+                    proofs = await get_proofs(db=self.db, id=keyset_id, conn=conn)
+                    self.proofs.extend(proofs)
+        keysets_str = " ".join([f"{k.id} ({k.unit})" for k in self.keysets.values()])
+        logger.trace(f"Proofs loaded for keysets: {keysets_str}")
 
     async def load_keysets_from_db(
         self, url: Union[str, None] = "", unit: Union[str, None] = ""
@@ -310,24 +379,26 @@ class Wallet(
     async def _check_used_secrets(self, secrets):
         """Checks if any of the secrets have already been used"""
         logger.trace("Checking secrets.")
-        for s in secrets:
-            if await secret_used(s, db=self.db):
-                raise Exception(f"secret already used: {s}")
+        async with self.db.get_connection() as conn:
+            for s in secrets:
+                if await secret_used(s, db=self.db, conn=conn):
+                    raise Exception(f"secret already used: {s}")
         logger.trace("Secret check complete.")
 
     async def request_mint_with_callback(
-        self, amount: int, callback: Callable
-    ) -> Tuple[Invoice, SubscriptionManager]:
-        """Request a Lightning invoice for minting tokens.
+        self, amount: int, callback: Callable, memo: Optional[str] = None
+    ) -> Tuple[MintQuote, SubscriptionManager]:
+        """Request a quote invoice for minting tokens.
 
         Args:
             amount (int): Amount for Lightning invoice in satoshis
             callback (Callable): Callback function to be called when the invoice is paid.
+            memo (Optional[str], optional): Memo for the Lightning invoice. Defaults
 
         Returns:
-            Invoice: Lightning invoice
+            MintQuote: Mint Quote
         """
-        mint_qoute = await super().mint_quote(amount, self.unit)
+        mint_qoute = await super().mint_quote(amount, self.unit, memo)
         subscriptions = SubscriptionManager(self.url)
         threading.Thread(
             target=subscriptions.connect, name="SubscriptionManager", daemon=True
@@ -337,41 +408,28 @@ class Wallet(
             filters=[mint_qoute.quote],
             callback=callback,
         )
-        # return the invoice
-        decoded_invoice = bolt11.decode(mint_qoute.request)
-        invoice = Invoice(
-            amount=amount,
-            bolt11=mint_qoute.request,
-            payment_hash=decoded_invoice.payment_hash,
-            id=mint_qoute.quote,
-            out=False,
-            time_created=int(time.time()),
-        )
-        await store_lightning_invoice(db=self.db, invoice=invoice)
-        return invoice, subscriptions
+        quote = MintQuote.from_resp_wallet(mint_qoute, self.url, amount, self.unit.name)
+        await store_bolt11_mint_quote(db=self.db, quote=quote)
 
-    async def request_mint(self, amount: int) -> Invoice:
-        """Request a Lightning invoice for minting tokens.
+        return quote, subscriptions
+
+    async def request_mint(self, amount: int, memo: Optional[str] = None) -> MintQuote:
+        """Request a quote invoice for minting tokens.
 
         Args:
             amount (int): Amount for Lightning invoice in satoshis
             callback (Optional[Callable], optional): Callback function to be called when the invoice is paid. Defaults to None.
+            memo (Optional[str], optional): Memo for the Lightning invoice. Defaults to None.
 
         Returns:
-            PostMintQuoteResponse: Mint Quote Response
+            MintQuote: Mint Quote
         """
-        mint_quote_response = await super().mint_quote(amount, self.unit)
-        decoded_invoice = bolt11.decode(mint_quote_response.request)
-        invoice = Invoice(
-            amount=amount,
-            bolt11=mint_quote_response.request,
-            payment_hash=decoded_invoice.payment_hash,
-            id=mint_quote_response.quote,
-            out=False,
-            time_created=int(time.time()),
+        mint_quote_response = await super().mint_quote(amount, self.unit, memo)
+        quote = MintQuote.from_resp_wallet(
+            mint_quote_response, self.url, amount, self.unit.name
         )
-        await store_lightning_invoice(db=self.db, invoice=invoice)
-        return invoice
+        await store_bolt11_mint_quote(db=self.db, quote=quote)
+        return quote
 
     def split_wallet_state(self, amount: int) -> List[int]:
         """This function produces an amount split for outputs based on the current state of the wallet.
@@ -398,7 +456,7 @@ class Wallet(
         # sort by increasing amount
         amounts_we_want.sort()
 
-        logger.debug(
+        logger.trace(
             f"Amounts we have: {[(a, amounts_we_have.count(a)) for a in set(amounts_we_have)]}"
         )
         amounts: list[int] = []
@@ -410,39 +468,18 @@ class Wallet(
         remaining_amount = amount - sum(amounts)
         if remaining_amount > 0:
             amounts += amount_split(remaining_amount)
+        amounts.sort()
 
-        logger.debug(f"Amounts we want: {amounts}")
+        logger.trace(f"Amounts we want: {amounts}")
         if sum(amounts) != amount:
             raise Exception(f"Amounts do not sum to {amount}.")
 
         return amounts
 
-    async def mint_quote(self, amount: int) -> Invoice:
-        """Request a Lightning invoice for minting tokens.
-
-        Args:
-            amount (int): Amount for Lightning invoice in satoshis
-
-        Returns:
-            Invoice: Lightning invoice for minting tokens
-        """
-        mint_quote_response = await super().mint_quote(amount, self.unit)
-        decoded_invoice = bolt11.decode(mint_quote_response.request)
-        invoice = Invoice(
-            amount=amount,
-            bolt11=mint_quote_response.request,
-            payment_hash=decoded_invoice.payment_hash,
-            id=mint_quote_response.quote,
-            out=False,
-            time_created=int(time.time()),
-        )
-        await store_lightning_invoice(db=self.db, invoice=invoice)
-        return invoice
-
     async def mint(
         self,
         amount: int,
-        id: str,
+        quote_id: str,
         split: Optional[List[int]] = None,
     ) -> List[Proof]:
         """Mint tokens of a specific amount after an invoice has been paid.
@@ -485,7 +522,7 @@ class Wallet(
         outputs, rs = self._construct_outputs(amounts, secrets, rs)
 
         # will raise exception if mint is unsuccessful
-        promises = await super().mint(outputs, id)
+        promises = await super().mint(outputs, quote_id)
 
         promises_keyset_id = promises[0].id
         await bump_secret_derivation(
@@ -493,15 +530,17 @@ class Wallet(
         )
         proofs = await self._construct_proofs(promises, secrets, rs, derivation_paths)
 
-        if id:
-            await update_lightning_invoice(
-                db=self.db, id=id, paid=True, time_paid=int(time.time())
-            )
-            # store the mint_id in proofs
-            async with self.db.connect() as conn:
-                for p in proofs:
-                    p.mint_id = id
-                    await update_proof(p, mint_id=id, conn=conn)
+        await update_bolt11_mint_quote(
+            db=self.db,
+            quote=quote_id,
+            state=MintQuoteState.paid,
+            paid_time=int(time.time()),
+        )
+        # store the mint_id in proofs
+        async with self.db.connect() as conn:
+            for p in proofs:
+                p.mint_id = quote_id
+                await update_proof(p, mint_id=quote_id, conn=conn)
         return proofs
 
     async def redeem(
@@ -519,16 +558,28 @@ class Wallet(
         self.verify_proofs_dleq(proofs)
         return await self.split(proofs=proofs, amount=0)
 
-    def swap_send_and_keep_output_amounts(
-        self, proofs: List[Proof], amount: int, fees: int = 0
+    def determine_output_amounts(
+        self,
+        proofs: List[Proof],
+        amount: int,
+        include_fees: bool = False,
+        keyset_id_outputs: Optional[str] = None,
     ) -> Tuple[List[int], List[int]]:
         """This function generates a suitable amount split for the outputs to keep and the outputs to send. It
         calculates the amount to keep based on the wallet state and the amount to send based on the amount
         provided.
 
+        Amount to keep is based on the proofs we have in the wallet
+        Amount to send is optimally split based on the amount provided plus optionally the fees required to receive them.
+
         Args:
             proofs (List[Proof]): Proofs to be split.
             amount (int): Amount to be sent.
+            include_fees (bool, optional): If True, the fees are included in the amount to send (output of
+                this method, to be sent in the future). This is not the fee that is required to swap the
+                `proofs` (input to this method). Defaults to False.
+            keyset_id_outputs (str, optional): The keyset ID of the outputs to be produced, used to determine the
+                fee if `include_fees` is set.
 
         Returns:
             Tuple[List[int], List[int]]: Two lists of amounts, one for keeping and one for sending.
@@ -536,25 +587,34 @@ class Wallet(
         # create a suitable amount split based on the proofs provided
         total = sum_proofs(proofs)
         keep_amt, send_amt = total - amount, amount
+
+        if include_fees:
+            keyset_id = keyset_id_outputs or self.keyset_id
+            tmp_proofs = [Proof(id=keyset_id) for _ in amount_split(send_amt)]
+            fee = self.get_fees_for_proofs(tmp_proofs)
+            keep_amt -= fee
+            send_amt += fee
+
         logger.trace(f"Keep amount: {keep_amt}, send amount: {send_amt}")
         logger.trace(f"Total input: {sum_proofs(proofs)}")
-        # generate splits for outputs
-        send_outputs = amount_split(send_amt)
+        # generate optimal split for outputs to send
+        send_amounts = amount_split(send_amt)
 
-        # we subtract the fee for the entire transaction from the amount to keep
+        # we subtract the input fee for the entire transaction from the amount to keep
         keep_amt -= self.get_fees_for_proofs(proofs)
         logger.trace(f"Keep amount: {keep_amt}")
 
         # we determine the amounts to keep based on the wallet state
-        keep_outputs = self.split_wallet_state(keep_amt)
+        keep_amounts = self.split_wallet_state(keep_amt)
 
-        return keep_outputs, send_outputs
+        return keep_amounts, send_amounts
 
     async def split(
         self,
         proofs: List[Proof],
         amount: int,
         secret_lock: Optional[Secret] = None,
+        include_fees: bool = False,
     ) -> Tuple[List[Proof], List[Proof]]:
         """Calls the swap API to split the proofs into two sets of proofs, one for keeping and one for sending.
 
@@ -566,6 +626,9 @@ class Wallet(
             proofs (List[Proof]): Proofs to be split.
             amount (int): Amount to be sent.
             secret_lock (Optional[Secret], optional): Secret to lock the tokens to be sent. Defaults to None.
+            include_fees (bool, optional): If True, the fees are included in the amount to send (output of
+                this method, to be sent in the future). This is not the fee that is required to swap the
+                `proofs` (input to this method) which must already be included. Defaults to False.
 
         Returns:
             Tuple[List[Proof], List[Proof]]: Two lists of proofs, one for keeping and one for sending.
@@ -577,17 +640,20 @@ class Wallet(
         proofs = copy.copy(proofs)
 
         # potentially add witnesses to unlock provided proofs (if they indicate one)
-        proofs = await self.add_witnesses_to_proofs(proofs)
+        proofs = self.add_witnesses_to_proofs(proofs)
 
         input_fees = self.get_fees_for_proofs(proofs)
-        logger.debug(f"Input fees: {input_fees}")
-        # create a suitable amount lists to keep and send based on the proofs
-        # provided and the state of the wallet
-        keep_outputs, send_outputs = self.swap_send_and_keep_output_amounts(
-            proofs, amount, input_fees
+        logger.trace(f"Input fees: {input_fees}")
+        # create a suitable amounts to keep and send.
+        keep_outputs, send_outputs = self.determine_output_amounts(
+            proofs,
+            amount,
+            include_fees=include_fees,
+            keyset_id_outputs=self.keyset_id,
         )
 
         amounts = keep_outputs + send_outputs
+
         # generate secrets for new outputs
         if secret_lock is None:
             secrets, rs, derivation_paths = await self.generate_n_secrets(len(amounts))
@@ -603,13 +669,27 @@ class Wallet(
         await self._check_used_secrets(secrets)
 
         # construct outputs
-        outputs, rs = self._construct_outputs(amounts, secrets, rs)
+        outputs, rs = self._construct_outputs(amounts, secrets, rs, self.keyset_id)
 
         # potentially add witnesses to outputs based on what requirement the proofs indicate
-        outputs = await self.add_witnesses_to_outputs(proofs, outputs)
+        outputs = self.add_witnesses_to_outputs(proofs, outputs)
+
+        # sort outputs by amount, remember original order
+        sorted_outputs_with_indices = sorted(
+            enumerate(outputs), key=lambda p: p[1].amount
+        )
+        original_indices, sorted_outputs = zip(*sorted_outputs_with_indices)
 
         # Call swap API
-        promises = await super().split(proofs, outputs)
+        sorted_promises = await super().split(proofs, sorted_outputs)
+
+        # sort promises back to original order
+        promises = [
+            promise
+            for _, promise in sorted(
+                zip(original_indices, sorted_promises), key=lambda x: x[0]
+            )
+        ]
 
         # Construct proofs from returned promises (i.e., unblind the signatures)
         new_proofs = await self._construct_proofs(
@@ -630,11 +710,19 @@ class Wallet(
         """
         if amount and not self.mint_info.supports_mpp("bolt11", self.unit):
             raise Exception("Mint does not support MPP, cannot specify amount.")
-        melt_quote = await super().melt_quote(invoice, self.unit, amount)
+        melt_quote_resp = await super().melt_quote(invoice, self.unit, amount)
         logger.debug(
-            f"Mint wants {self.unit.str(melt_quote.fee_reserve)} as fee reserve."
+            f"Mint wants {self.unit.str(melt_quote_resp.fee_reserve)} as fee reserve."
         )
-        return melt_quote
+        melt_quote = MeltQuote.from_resp_wallet(
+            melt_quote_resp,
+            self.url,
+            amount=melt_quote_resp.amount,
+            unit=self.unit.name,
+            request=invoice,
+        )
+        await store_bolt11_melt_quote(db=self.db, quote=melt_quote)
+        return melt_quote_resp
 
     async def melt(
         self, proofs: List[Proof], invoice: str, fee_reserve_sat: int, quote_id: str
@@ -649,6 +737,7 @@ class Wallet(
         """
         # Make sure we're operating on an independent copy of proofs
         proofs = copy.copy(proofs)
+        amount = sum_proofs(proofs)
 
         # Generate a number of blank outputs for any overpaid fees. As described in
         # NUT-08, the mint will imprint these outputs with a value depending on the
@@ -669,56 +758,56 @@ class Wallet(
                 p.melt_id = quote_id
                 await update_proof(p, melt_id=quote_id, conn=conn)
 
-        # we store the invoice object in the database to later be able to check the invoice state
-
-        decoded_invoice = bolt11.decode(invoice)
-        invoice_obj = Invoice(
-            amount=-sum_proofs(proofs),
-            bolt11=invoice,
-            payment_hash=decoded_invoice.payment_hash,
-            # preimage=status.preimage,
-            paid=False,
-            time_paid=int(time.time()),
-            id=quote_id,  # store the same ID in the invoice
-            out=True,  # outgoing invoice
+        melt_quote_resp = await super().melt(quote_id, proofs, change_outputs)
+        melt_quote = MeltQuote.from_resp_wallet(
+            melt_quote_resp,
+            self.url,
+            amount=amount,
+            unit=self.unit.name,
+            request=invoice,
         )
-        # store invoice in db as not paid yet
-        await store_lightning_invoice(db=self.db, invoice=invoice_obj)
-
-        status = await super().melt(quote_id, proofs, change_outputs)
-
         # if payment fails
-        if not status.paid:
-            # remove the melt_id in proofs
+        if melt_quote.state == MeltQuoteState.unpaid:
+            # remove the melt_id in proofs and set reserved to False
             for p in proofs:
                 p.melt_id = None
-                await update_proof(p, melt_id=None, db=self.db)
+                p.reserved = False
+                await update_proof(p, melt_id="", db=self.db)
             raise Exception("could not pay invoice.")
+        elif melt_quote.state == MeltQuoteState.pending:
+            # payment is still pending
+            logger.debug("Payment is still pending.")
+            return melt_quote_resp
 
         # invoice was paid successfully
-
         await self.invalidate(proofs)
 
         # update paid status in db
         logger.trace(f"Settings invoice {quote_id} to paid.")
-        await update_lightning_invoice(
+        logger.trace(f"Quote: {melt_quote_resp}")
+        fee_paid = melt_quote.amount + melt_quote.fee_paid
+        if melt_quote.change:
+            fee_paid -= sum_promises(melt_quote.change)
+
+        await update_bolt11_melt_quote(
             db=self.db,
-            id=quote_id,
-            paid=True,
-            time_paid=int(time.time()),
-            preimage=status.payment_preimage,
+            quote=quote_id,
+            state=MeltQuoteState.paid,
+            paid_time=int(time.time()),
+            payment_preimage=melt_quote.payment_preimage or "",
+            fee_paid=fee_paid,
         )
 
         # handle change and produce proofs
-        if status.change:
+        if melt_quote.change:
             change_proofs = await self._construct_proofs(
-                status.change,
-                change_secrets[: len(status.change)],
-                change_rs[: len(status.change)],
-                change_derivation_paths[: len(status.change)],
+                melt_quote.change,
+                change_secrets[: len(melt_quote.change)],
+                change_rs[: len(melt_quote.change)],
+                change_derivation_paths[: len(melt_quote.change)],
             )
             logger.debug(f"Received change: {self.unit.str(sum_proofs(change_proofs))}")
-        return status
+        return melt_quote_resp
 
     async def check_proof_state(self, proofs) -> PostCheckStateResponse:
         return await super().check_proof_state(proofs)
@@ -845,6 +934,7 @@ class Wallet(
         amounts: List[int],
         secrets: List[str],
         rs: List[PrivateKey] = [],
+        keyset_id: Optional[str] = None,
     ) -> Tuple[List[BlindedMessage], List[PrivateKey]]:
         """Takes a list of amounts and secrets and returns outputs.
         Outputs are blinded messages `outputs` and blinding factors `rs`
@@ -864,8 +954,8 @@ class Wallet(
         assert len(amounts) == len(
             secrets
         ), f"len(amounts)={len(amounts)} not equal to len(secrets)={len(secrets)}"
+        keyset_id = keyset_id or self.keyset_id
         outputs: List[BlindedMessage] = []
-
         rs_ = [None] * len(amounts) if not rs else rs
         rs_return: List[PrivateKey] = []
         for secret, amount, r in zip(secrets, amounts, rs_):
@@ -878,7 +968,7 @@ class Wallet(
 
             rs_return.append(r)
             output = BlindedMessage(
-                amount=amount, B_=B_.serialize().hex(), id=self.keyset_id
+                amount=amount, B_=B_.serialize().hex(), id=keyset_id
             )
             outputs.append(output)
             logger.trace(f"Constructing output: {output}, r: {r.serialize()}")
@@ -921,10 +1011,15 @@ class Wallet(
         """
         invalidated_proofs: List[Proof] = []
         if check_spendable:
-            proof_states = await self.check_proof_state(proofs)
-            for i, state in enumerate(proof_states.states):
-                if state.state == ProofSpentState.spent:
-                    invalidated_proofs.append(proofs[i])
+            # checks proofs in batches
+            for _proofs in [
+                proofs[i : i + settings.proofs_batch_size]
+                for i in range(0, len(proofs), settings.proofs_batch_size)
+            ]:
+                proof_states = await self.check_proof_state(proofs)
+                for i, state in enumerate(proof_states.states):
+                    if state.spent:
+                        invalidated_proofs.append(proofs[i])
         else:
             invalidated_proofs = proofs
 
@@ -934,9 +1029,12 @@ class Wallet(
                 f" {self.unit.str(sum_proofs(invalidated_proofs))}."
             )
 
-        async with self.db.connect() as conn:
-            for p in invalidated_proofs:
-                await invalidate_proof(p, db=self.db, conn=conn)
+        for p in invalidated_proofs:
+            try:
+                # mark proof as spent
+                await invalidate_proof(p, db=self.db)
+            except Exception as e:
+                logger.error(f"DB error while invalidating proof: {e}")
 
         invalidate_secrets = [p.secret for p in invalidated_proofs]
         self.proofs = list(
@@ -953,7 +1051,7 @@ class Wallet(
         *,
         set_reserved: bool = False,
         offline: bool = False,
-        include_fees: bool = True,
+        include_fees: bool = False,
     ) -> Tuple[List[Proof], int]:
         """
         Selects proofs such that a desired `amount` can be sent. If the offline coin selection is unsuccessful,
@@ -961,12 +1059,15 @@ class Wallet(
 
         If `set_reserved` is set to True, the proofs are marked as reserved so they aren't used in other transactions.
 
-        If `include_fees` is set to False, the swap fees are not included in the amount to be selected.
+        If `include_fees` is set to True, the selection includes the swap fees to receive the selected proofs.
 
         Args:
             proofs (List[Proof]): Proofs to split
             amount (int): Amount to split to
-            set_reserved (bool, optional): If set, the proofs are marked as reserved.
+            set_reserved (bool, optional): If set, the proofs are marked as reserved. Defaults to False.
+            offline (bool, optional): If set, the coin selection is done offline. Defaults to False.
+            include_fees (bool, optional): If set, the fees for spending the proofs later are included in the
+                amount to be selected. Defaults to False.
 
         Returns:
             List[Proof]: Proofs to send
@@ -978,9 +1079,7 @@ class Wallet(
             raise Exception("balance too low.")
 
         # coin selection for potentially offline sending
-        send_proofs = await self._select_proofs_to_send(
-            proofs, amount, include_fees=include_fees
-        )
+        send_proofs = self.coinselect(proofs, amount, include_fees=include_fees)
         fees = self.get_fees_for_proofs(send_proofs)
         logger.trace(
             f"select_to_send: selected: {self.unit.str(sum_proofs(send_proofs))} (+ {self.unit.str(fees)} fees) – wanted: {self.unit.str(amount)}"
@@ -990,8 +1089,11 @@ class Wallet(
             if not offline:
                 logger.debug("Offline coin selection unsuccessful. Splitting proofs.")
                 # we set the proofs as reserved later
-                _, send_proofs = await self.split_to_send(
-                    proofs, amount, set_reserved=False
+                _, send_proofs = await self.swap_to_send(
+                    proofs,
+                    amount,
+                    set_reserved=False,
+                    include_fees=include_fees,
                 )
             else:
                 raise Exception(
@@ -1002,14 +1104,14 @@ class Wallet(
             await self.set_reserved(send_proofs, reserved=True)
         return send_proofs, fees
 
-    async def split_to_send(
+    async def swap_to_send(
         self,
         proofs: List[Proof],
         amount: int,
         *,
         secret_lock: Optional[Secret] = None,
         set_reserved: bool = False,
-        include_fees: bool = True,
+        include_fees: bool = False,
     ) -> Tuple[List[Proof], List[Proof]]:
         """
         Swaps a set of proofs with the mint to get a set that sums up to a desired amount that can be sent. The remaining
@@ -1022,8 +1124,9 @@ class Wallet(
             amount (int): Amount to split to
             secret_lock (Optional[str], optional): If set, a custom secret is used to lock new outputs. Defaults to None.
             set_reserved (bool, optional): If set, the proofs are marked as reserved. Should be set to False if a payment attempt
-            is made with the split that could fail (like a Lightning payment). Should be set to True if the token to be sent is
-            displayed to the user to be then sent to someone else. Defaults to False.
+                is made with the split that could fail (like a Lightning payment). Should be set to True if the token to be sent is
+                displayed to the user to be then sent to someone else. Defaults to False.
+            include_fees (bool, optional): If set, the fees for spending the send_proofs later are included in the amount to be selected. Defaults to True.
 
         Returns:
             Tuple[List[Proof], List[Proof]]: Tuple of proofs to keep and proofs to send
@@ -1033,12 +1136,10 @@ class Wallet(
         if sum_proofs(proofs) < amount:
             raise Exception("balance too low.")
 
-        # coin selection for swapping
-        # spendable_proofs, fees = await self._select_proofs_to_split(proofs, amount)
-        swap_proofs = await self._select_proofs_to_send(
-            proofs, amount, include_fees=True
-        )
-        # add proofs from inactive keysets to swap_proofs to get rid of them
+        # coin selection for swapping, needs to include fees
+        swap_proofs = self.coinselect(proofs, amount, include_fees=True)
+
+        # Extra rule: add proofs from inactive keysets to swap_proofs to get rid of them
         swap_proofs += [
             p
             for p in proofs
@@ -1049,7 +1150,9 @@ class Wallet(
         logger.debug(
             f"Amount to send: {self.unit.str(amount)} (+ {self.unit.str(fees)} fees)"
         )
-        keep_proofs, send_proofs = await self.split(swap_proofs, amount, secret_lock)
+        keep_proofs, send_proofs = await self.split(
+            swap_proofs, amount, secret_lock, include_fees=include_fees
+        )
         if set_reserved:
             await self.set_reserved(send_proofs, reserved=True)
         return keep_proofs, send_proofs
@@ -1136,31 +1239,41 @@ class Wallet(
             to (int, optional): The number of consecutive empty responses to stop restoring. Defaults to 2.
             batch (int, optional): The number of proofs to restore in one batch. Defaults to 25.
         """
-        stop_counter = 0
+        empty_batches = 0
         # we get the current secret counter and restore from there on
         spendable_proofs = []
         counter_before = await bump_secret_derivation(
             db=self.db, keyset_id=keyset_id, by=0
         )
         if counter_before != 0:
-            print("Keyset has already been used. Restoring from it's last state.")
+            print("Keyset has already been used. Restoring from its last state.")
         i = counter_before
-        n_last_restored_proofs = 0
-        while stop_counter < to:
-            print(f"Restoring token {i} to {i + batch}...")
-            restored_proofs = await self.restore_promises_from_to(i, i + batch - 1)
+        last_restore_count = 0
+        while empty_batches < to:
+            print(f"Restoring counter {i} to {i + batch} for keyset {keyset_id} ...")
+            (
+                next_restored_output_index,
+                restored_proofs,
+            ) = await self.restore_promises_from_to(keyset_id, i, i + batch - 1)
+            last_restore_count += next_restored_output_index
+            i += batch
             if len(restored_proofs) == 0:
-                stop_counter += 1
+                empty_batches += 1
+                continue
             spendable_proofs = await self.invalidate(
                 restored_proofs, check_spendable=True
             )
             if len(spendable_proofs):
-                n_last_restored_proofs = len(spendable_proofs)
-                print(f"Restored {sum_proofs(restored_proofs)} sat")
-            i += batch
+                print(
+                    f"Restored {sum_proofs(spendable_proofs)} sat for keyset {keyset_id}."
+                )
+            else:
+                logger.debug(
+                    f"None of the {len(restored_proofs)} restored proofs are spendable."
+                )
 
         # restore the secret counter to its previous value for the last round
-        revert_counter_by = batch * to + n_last_restored_proofs
+        revert_counter_by = i - last_restore_count
         logger.debug(f"Reverting secret counter by {revert_counter_by}")
         before = await bump_secret_derivation(
             db=self.db,
@@ -1170,8 +1283,8 @@ class Wallet(
         logger.debug(
             f"Secret counter reverted from {before} to {before - revert_counter_by}"
         )
-        if n_last_restored_proofs == 0:
-            print("No tokens restored for keyset.")
+        if last_restore_count == 0:
+            print(f"No tokens restored for keyset {keyset_id}.")
             return
 
     async def restore_wallet_from_mnemonic(
@@ -1186,14 +1299,14 @@ class Wallet(
             batch (int, optional): The number of proofs to restore in one batch. Defaults to 25.
         """
         await self._init_private_key(mnemonic)
-        await self.load_mint()
+        await self.load_mint(force_old_keysets=False)
         print("Restoring tokens...")
         for keyset_id in self.keysets.keys():
             await self.restore_tokens_for_keyset(keyset_id, to, batch)
 
     async def restore_promises_from_to(
-        self, from_counter: int, to_counter: int
-    ) -> List[Proof]:
+        self, keyset_id: str, from_counter: int, to_counter: int
+    ) -> Tuple[int, List[Proof]]:
         """Restores promises from a given range of counters. This is for restoring a wallet from a mnemonic.
 
         Args:
@@ -1201,18 +1314,20 @@ class Wallet(
             to_counter (int): Counter for the secret derivation to end at
 
         Returns:
-            List[Proof]: List of restored proofs
+            Tuple[int, List[Proof]]: Index of the last restored output and list of restored proofs
         """
         # we regenerate the secrets and rs for the given range
         secrets, rs, derivation_paths = await self.generate_secrets_from_to(
-            from_counter, to_counter
+            from_counter, to_counter, keyset_id=keyset_id
         )
         # we don't know the amount but luckily the mint will tell us so we use a dummy amount here
         amounts_dummy = [1] * len(secrets)
         # we generate outputs from deterministic secrets and rs
-        regenerated_outputs, _ = self._construct_outputs(amounts_dummy, secrets, rs)
+        regenerated_outputs, _ = self._construct_outputs(
+            amounts_dummy, secrets, rs, keyset_id=keyset_id
+        )
         # we ask the mint to reissue the promises
-        proofs = await self.restore_promises(
+        next_restored_output_index, proofs = await self.restore_promises(
             outputs=regenerated_outputs,
             secrets=secrets,
             rs=rs,
@@ -1220,9 +1335,9 @@ class Wallet(
         )
 
         await set_secret_derivation(
-            db=self.db, keyset_id=self.keyset_id, counter=to_counter + 1
+            db=self.db, keyset_id=keyset_id, counter=to_counter + 1
         )
-        return proofs
+        return next_restored_output_index, proofs
 
     async def restore_promises(
         self,
@@ -1230,7 +1345,7 @@ class Wallet(
         secrets: List[str],
         rs: List[PrivateKey],
         derivation_paths: List[str],
-    ) -> List[Proof]:
+    ) -> Tuple[int, List[Proof]]:
         """Restores proofs from a list of outputs, secrets, rs and derivation paths.
 
         Args:
@@ -1240,10 +1355,26 @@ class Wallet(
             derivation_paths (List[str]): Derivation paths used for the secrets necessary to unblind the promises
 
         Returns:
-            List[Proof]: List of restored proofs
+            Tuple[int, List[Proof]]: Index of the last restored output and list of restored proofs
         """
         # restored_outputs is there so we can match the promises to the secrets and rs
         restored_outputs, restored_promises = await super().restore_promises(outputs)
+        # determine the index in `outputs` of the last restored output from restored_outputs[-1].B_
+        if not restored_outputs:
+            next_restored_output_index = 0
+        else:
+            next_restored_output_index = (
+                next(
+                    (
+                        idx
+                        for idx, val in enumerate(outputs)
+                        if val.B_ == restored_outputs[-1].B_
+                    ),
+                    0,
+                )
+                + 1
+            )
+        logger.trace(f"Last restored output index: {next_restored_output_index}")
         # now we need to filter out the secrets and rs that had a match
         matching_indices = [
             idx
@@ -1252,9 +1383,12 @@ class Wallet(
         ]
         secrets = [secrets[i] for i in matching_indices]
         rs = [rs[i] for i in matching_indices]
+        logger.debug(
+            f"Restored {len(restored_promises)} promises. Constructing proofs."
+        )
         # now we can construct the proofs with the secrets and rs
         proofs = await self._construct_proofs(
             restored_promises, secrets, rs, derivation_paths
         )
         logger.debug(f"Restored {len(restored_promises)} promises")
-        return proofs
+        return next_restored_output_index, proofs

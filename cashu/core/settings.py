@@ -8,7 +8,7 @@ from pydantic import BaseSettings, Extra, Field
 
 env = Env()
 
-VERSION = "0.15.3"
+VERSION = "0.16.3"
 
 
 def find_env_file():
@@ -46,6 +46,7 @@ class EnvSettings(CashuSettings):
     debug_profiling: bool = Field(default=False)
     debug_mint_only_deprecated: bool = Field(default=False)
     db_backup_path: Optional[str] = Field(default=None)
+    db_connection_pool: bool = Field(default=True)
 
 
 class MintSettings(CashuSettings):
@@ -61,6 +62,11 @@ class MintSettings(CashuSettings):
     mint_max_secret_length: int = Field(default=512)
 
     mint_input_fee_ppk: int = Field(default=0)
+    mint_disable_melt_on_error: bool = Field(default=False)
+
+
+class MintDeprecationFlags(MintSettings):
+    mint_inactivate_base64_keysets: bool = Field(default=False)
 
 
 class MintBackends(MintSettings):
@@ -131,18 +137,23 @@ class MintLimits(MintSettings):
 
 class FakeWalletSettings(MintSettings):
     fakewallet_brr: bool = Field(default=True)
-    fakewallet_delay_outgoing_payment: Optional[int] = Field(default=3)
-    fakewallet_delay_incoming_payment: Optional[int] = Field(default=3)
+    fakewallet_delay_outgoing_payment: Optional[float] = Field(default=3.0)
+    fakewallet_delay_incoming_payment: Optional[float] = Field(default=3.0)
     fakewallet_stochastic_invoice: bool = Field(default=False)
-    fakewallet_payment_state: Optional[bool] = Field(default=None)
+    fakewallet_payment_state: Optional[str] = Field(default="SETTLED")
+    fakewallet_payment_state_exception: Optional[bool] = Field(default=False)
+    fakewallet_pay_invoice_state: Optional[str] = Field(default="SETTLED")
+    fakewallet_pay_invoice_state_exception: Optional[bool] = Field(default=False)
 
 
 class MintInformation(CashuSettings):
     mint_info_name: str = Field(default="Cashu mint")
     mint_info_description: str = Field(default=None)
     mint_info_description_long: str = Field(default=None)
-    mint_info_contact: List[List[str]] = Field(default=[["", ""]])
+    mint_info_contact: List[List[str]] = Field(default=[])
     mint_info_motd: str = Field(default=None)
+    mint_info_icon_url: str = Field(default=None)
+    mint_info_urls: List[str] = Field(default=None)
 
 
 class WalletSettings(CashuSettings):
@@ -183,6 +194,14 @@ class WalletSettings(CashuSettings):
     wallet_target_amount_count: int = Field(default=3)
 
 
+class WalletDeprecationFlags(CashuSettings):
+    wallet_inactivate_base64_keysets: bool = Field(
+        default=True,
+        title="Inactivate legacy base64 keysets",
+        description="If you turn on this flag, old bas64 keysets will be ignored and the wallet will ony use new keyset versions.",
+    )
+
+
 class LndRestFundingSource(MintSettings):
     mint_lnd_rest_endpoint: Optional[str] = Field(default=None)
     mint_lnd_rest_cert: Optional[str] = Field(default=None)
@@ -190,7 +209,20 @@ class LndRestFundingSource(MintSettings):
     mint_lnd_rest_macaroon: Optional[str] = Field(default=None)
     mint_lnd_rest_admin_macaroon: Optional[str] = Field(default=None)
     mint_lnd_rest_invoice_macaroon: Optional[str] = Field(default=None)
-    mint_lnd_enable_mpp: bool = Field(default=False)
+    mint_lnd_enable_mpp: bool = Field(default=True)
+
+
+class LndRPCFundingSource(MintSettings):
+    mint_lnd_rpc_endpoint: Optional[str] = Field(default=None)
+    mint_lnd_rpc_cert: Optional[str] = Field(default=None)
+    mint_lnd_rpc_macaroon: Optional[str] = Field(default=None)
+
+
+class CLNRestFundingSource(MintSettings):
+    mint_clnrest_url: Optional[str] = Field(default=None)
+    mint_clnrest_cert: Optional[str] = Field(default=None)
+    mint_clnrest_rune: Optional[str] = Field(default=None)
+    mint_clnrest_enable_mpp: bool = Field(default=True)
 
 
 class CoreLightningRestFundingSource(MintSettings):
@@ -201,14 +233,18 @@ class CoreLightningRestFundingSource(MintSettings):
 
 class Settings(
     EnvSettings,
+    LndRPCFundingSource,
     LndRestFundingSource,
     CoreLightningRestFundingSource,
+    CLNRestFundingSource,
     FakeWalletSettings,
     MintLimits,
     MintBackends,
+    MintDeprecationFlags,
     MintSettings,
     MintInformation,
     WalletSettings,
+    WalletDeprecationFlags,
     CashuSettings,
 ):
     version: str = Field(default=VERSION)

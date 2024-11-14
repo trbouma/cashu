@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import importlib
 import json
@@ -6,11 +7,42 @@ import random
 import string
 import time
 from subprocess import PIPE, Popen, TimeoutExpired
-from typing import Tuple
+from typing import List, Tuple, Union
 
 from loguru import logger
 
+from cashu.core.errors import CashuError
 from cashu.core.settings import settings
+
+
+async def assert_err(f, msg: Union[str, CashuError]):
+    """Compute f() and expect an error message 'msg'."""
+    try:
+        await f
+    except Exception as exc:
+        error_message: str = str(exc.args[0])
+        if isinstance(msg, CashuError):
+            if msg.detail not in error_message:
+                raise Exception(
+                    f"CashuError. Expected error: {msg.detail}, got: {error_message}"
+                )
+            return
+        if msg not in error_message:
+            raise Exception(f"Expected error: {msg}, got: {error_message}")
+        return
+    raise Exception(f"Expected error: {msg}, got no error")
+
+
+async def assert_err_multiple(f, msgs: List[str]):
+    """Compute f() and expect an error message 'msg'."""
+    try:
+        await f
+    except Exception as exc:
+        for msg in msgs:
+            if msg in str(exc.args[0]):
+                return
+        raise Exception(f"Expected error: {msgs}, got: {exc.args[0]}")
+    raise Exception(f"Expected error: {msgs}, got no error")
 
 
 def get_random_string(N: int = 10):
@@ -63,6 +95,17 @@ docker_lightning_unconnected_cli = [
     "regtest",
     "--rpcserver=lnd-2",
 ]
+
+
+def docker_clightning_cli(index):
+    return [
+        "docker",
+        "exec",
+        f"cashu-clightning-{index}-1",
+        "lightning-cli",
+        "--network",
+        "regtest",
+    ]
 
 
 def run_cmd(cmd: list) -> str:
@@ -130,6 +173,21 @@ def pay_real_invoice(invoice: str) -> str:
     return run_cmd(cmd)
 
 
+def partial_pay_real_invoice(invoice: str, amount: int, node: int) -> str:
+    cmd = docker_clightning_cli(node)
+    cmd.extend(["pay", f"bolt11={invoice}", f"partial_msat={amount*1000}"])
+    return run_cmd(cmd)
+
+
+def get_real_invoice_cln(sats: int) -> str:
+    cmd = docker_clightning_cli(1)
+    cmd.extend(
+        ["invoice", f"{sats*1000}", hashlib.sha256(os.urandom(32)).hexdigest(), "test"]
+    )
+    result = run_cmd_json(cmd)
+    return result["bolt11"]
+
+
 def mine_blocks(blocks: int = 1) -> str:
     cmd = docker_bitcoin_cli.copy()
     cmd.extend(["-generate", str(blocks)])
@@ -157,6 +215,9 @@ def pay_onchain(address: str, sats: int) -> str:
     return run_cmd(cmd)
 
 
-def pay_if_regtest(bolt11: str):
+async def pay_if_regtest(bolt11: str):
     if is_regtest:
         pay_real_invoice(bolt11)
+    if is_fake:
+        await asyncio.sleep(settings.fakewallet_delay_incoming_payment or 0)
+    await asyncio.sleep(0.1)

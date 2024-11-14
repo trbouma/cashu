@@ -1,10 +1,10 @@
-import base64
-import json
+import hashlib
 import os
+from typing import Optional
 
 from loguru import logger
 
-from ..core.base import TokenV1, TokenV2, TokenV3, TokenV3Token
+from ..core.base import Token, TokenV3, TokenV4
 from ..core.db import Database
 from ..core.helpers import sum_proofs
 from ..core.migrations import migrate_databases
@@ -35,7 +35,7 @@ async def list_mints(wallet: Wallet):
     return mints
 
 
-async def redeem_TokenV3_multimint(wallet: Wallet, token: TokenV3) -> Wallet:
+async def redeem_TokenV3(wallet: Wallet, token: TokenV3) -> Wallet:
     """
     Helper function to iterate thruogh a token with multiple mints and redeem them from
     these mints one keyset at a time.
@@ -47,15 +47,13 @@ async def redeem_TokenV3_multimint(wallet: Wallet, token: TokenV3) -> Wallet:
             token.unit = keysets[0].unit.name
 
     for t in token.token:
-        assert t.mint, Exception(
-            "redeem_TokenV3_multimint: multimint redeem without URL"
-        )
+        assert t.mint, Exception("redeem_TokenV3: multimint redeem without URL")
         mint_wallet = await Wallet.with_db(
             t.mint,
             os.path.join(settings.cashu_dir, wallet.name),
             unit=token.unit or wallet.unit.name,
         )
-        keyset_ids = mint_wallet._get_proofs_keysets(t.proofs)
+        keyset_ids = mint_wallet._get_proofs_keyset_ids(t.proofs)
         logger.trace(f"Keysets in tokens: {' '.join(set(keyset_ids))}")
         await mint_wallet.load_mint()
         proofs_to_keep, _ = await mint_wallet.redeem(t.proofs)
@@ -65,59 +63,35 @@ async def redeem_TokenV3_multimint(wallet: Wallet, token: TokenV3) -> Wallet:
     return mint_wallet
 
 
-def serialize_TokenV2_to_TokenV3(tokenv2: TokenV2):
-    """Helper function to receive legacy TokenV2 tokens.
-    Takes a list of proofs and constructs a *serialized* TokenV3 to be received through
-    the ordinary path.
-
-    Returns:
-        TokenV3: TokenV3
+async def redeem_TokenV4(wallet: Wallet, token: TokenV4) -> Wallet:
     """
-    tokenv3 = TokenV3(token=[TokenV3Token(proofs=tokenv2.proofs)])
-    if tokenv2.mints:
-        tokenv3.token[0].mint = tokenv2.mints[0].url
-    token_serialized = tokenv3.serialize()
-    return token_serialized
-
-
-def serialize_TokenV1_to_TokenV3(tokenv1: TokenV1):
-    """Helper function to receive legacy TokenV1 tokens.
-    Takes a list of proofs and constructs a *serialized* TokenV3 to be received through
-    the ordinary path.
-
-    Returns:
-        TokenV3: TokenV3
+    Redeem a token with a single mint.
     """
-    tokenv3 = TokenV3(token=[TokenV3Token(proofs=tokenv1.__root__)])
-    token_serialized = tokenv3.serialize()
-    return token_serialized
+    await wallet.load_mint()
+    proofs_to_keep, _ = await wallet.redeem(token.proofs)
+    print(f"Received {wallet.unit.str(sum_proofs(proofs_to_keep))}")
+    return wallet
 
 
-def deserialize_token_from_string(token: str) -> TokenV3:
+async def redeem_universal(wallet: Wallet, token: Token) -> Wallet:
+    if isinstance(token, TokenV3):
+        return await redeem_TokenV3(wallet, token)
+    if isinstance(token, TokenV4):
+        return await redeem_TokenV4(wallet, token)
+    raise Exception("Invalid token type")
+
+
+def deserialize_token_from_string(token: str) -> Token:
     # deserialize token
-
-    # ----- backwards compatibility -----
-
-    # V2Tokens (0.7-0.11.0) (eyJwcm9...)
-    if token.startswith("eyJwcm9"):
+    if token.startswith("cashuA"):
+        tokenV3Obj = TokenV3.deserialize(token)
         try:
-            tokenv2 = TokenV2.parse_obj(json.loads(base64.urlsafe_b64decode(token)))
-            token = serialize_TokenV2_to_TokenV3(tokenv2)
-        except Exception:
-            pass
-
-    # V1Tokens (<0.7) (W3siaWQ...)
-    if token.startswith("W3siaWQ"):
-        try:
-            tokenv1 = TokenV1.parse_obj(json.loads(base64.urlsafe_b64decode(token)))
-            token = serialize_TokenV1_to_TokenV3(tokenv1)
-        except Exception:
-            pass
-
-    if token.startswith("cashu"):
-        tokenObj = TokenV3.deserialize(token)
-        assert len(tokenObj.token), Exception("no proofs in token")
-        assert len(tokenObj.token[0].proofs), Exception("no proofs in token")
+            return TokenV4.from_tokenv3(tokenV3Obj)
+        except ValueError as e:
+            logger.debug(f"Could not convert TokenV3 to TokenV4: {e}")
+            return tokenV3Obj
+    if token.startswith("cashuB"):
+        tokenObj = TokenV4.deserialize(token)
         return tokenObj
 
     raise Exception("Invalid token")
@@ -125,39 +99,9 @@ def deserialize_token_from_string(token: str) -> TokenV3:
 
 async def receive(
     wallet: Wallet,
-    tokenObj: TokenV3,
+    token: Token,
 ) -> Wallet:
-    logger.debug(f"receive: {tokenObj}")
-    proofs = [p for t in tokenObj.token for p in t.proofs]
-
-    includes_mint_info: bool = any([t.mint for t in tokenObj.token])
-
-    if includes_mint_info:
-        # redeem tokens with new wallet instances
-        mint_wallet = await redeem_TokenV3_multimint(
-            wallet,
-            tokenObj,
-        )
-    else:
-        # this is very legacy code, virtually any token should have mint information
-        # no mint information present, we extract the proofs find the mint and unit from the db
-        keyset_in_token = proofs[0].id
-        assert keyset_in_token
-        # we get the keyset from the db
-        mint_keysets = await get_keysets(id=keyset_in_token, db=wallet.db)
-        assert mint_keysets, Exception(f"we don't know this keyset: {keyset_in_token}")
-        mint_keyset = [k for k in mint_keysets if k.id == keyset_in_token][0]
-        assert mint_keyset.mint_url, Exception("we don't know this mint's URL")
-        # now we have the URL
-        mint_wallet = await Wallet.with_db(
-            mint_keyset.mint_url,
-            os.path.join(settings.cashu_dir, wallet.name),
-            unit=mint_keyset.unit.name or wallet.unit.name,
-        )
-        await mint_wallet.load_mint(keyset_in_token)
-        _, _ = await mint_wallet.redeem(proofs)
-        print(f"Received {mint_wallet.unit.str(sum_proofs(proofs))}")
-
+    mint_wallet = await redeem_universal(wallet, token)
     # reload main wallet so the balance updates
     await wallet.load_proofs(reload=True)
     return mint_wallet
@@ -172,6 +116,8 @@ async def send(
     offline: bool = False,
     include_dleq: bool = False,
     include_fees: bool = False,
+    memo: Optional[str] = None,
+    force_swap: bool = False,
 ):
     """
     Prints token to send to stdout.
@@ -192,39 +138,43 @@ async def send(
             secret_lock = await wallet.create_p2pk_lock(
                 lock.split(":")[1],
                 locktime_seconds=settings.locktime_delta_seconds,
-                sig_all=True,
+                sig_all=False,
                 n_sigs=1,
             )
-            print(f"Secret lock: {secret_lock}")
+            logger.debug(f"Secret lock: {secret_lock}")
 
     await wallet.load_proofs()
 
     await wallet.load_mint()
-    # get a proof with specific amount
-    send_proofs, fees = await wallet.select_to_send(
-        wallet.proofs,
-        amount,
-        set_reserved=False,
-        offline=offline,
-        include_fees=include_fees,
-    )
+    if secret_lock or force_swap:
+        _, send_proofs = await wallet.swap_to_send(
+            wallet.proofs,
+            amount,
+            set_reserved=False,  # we set reserved later
+            secret_lock=secret_lock,
+        )
+    else:
+        send_proofs, fees = await wallet.select_to_send(
+            wallet.proofs,
+            amount,
+            set_reserved=False,  # we set reserved later
+            offline=offline,
+            include_fees=include_fees,
+        )
 
     token = await wallet.serialize_proofs(
-        send_proofs,
-        include_mints=True,
-        include_dleq=include_dleq,
+        send_proofs, include_dleq=include_dleq, legacy=legacy, memo=memo
     )
-    print(token)
-    await wallet.set_reserved(send_proofs, reserved=True)
-    if legacy:
-        print("")
-        print("Old token format:")
-        print("")
-        token = await wallet.serialize_proofs(
-            send_proofs,
-            legacy=True,
-            include_dleq=include_dleq,
-        )
-        print(token)
 
+    print(token)
+
+    await wallet.set_reserved(send_proofs, reserved=True)
     return wallet.available_balance, token
+
+def check_payment_preimage(
+    payment_hash: str,
+    preimage: str,
+) -> bool:
+    return bytes.fromhex(payment_hash) == hashlib.sha256(
+        bytes.fromhex(preimage)
+    ).digest()

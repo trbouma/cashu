@@ -97,7 +97,7 @@ async def test_bump_secret_derivation(wallet3: Wallet):
     assert [r.private_key for r in rs1] == [r.private_key for r in rs2]
     assert derivation_paths1 == derivation_paths2
     for s in secrets1:
-        print('"' + s + '",')
+        print(f'"{s}",')
     assert secrets1 == [
         "485875df74771877439ac06339e284c3acfcd9be7abf3bc20b516faeadfe77ae",
         "8f2b39e8e594a4056eb1e6dbb4b0c38ef13b1b2c751f64f810ec04ee35b77270",
@@ -114,7 +114,7 @@ async def test_bump_secret_derivation(wallet3: Wallet):
     ]
 
     for d in derivation_paths1:
-        print('"' + d + '",')
+        print(f'"{d}",')
     assert derivation_paths1 == [
         "m/129372'/0'/864559728'/0'",
         "m/129372'/0'/864559728'/1'",
@@ -156,15 +156,15 @@ async def test_generate_secrets_from_to(wallet3: Wallet):
 @pytest.mark.asyncio
 async def test_restore_wallet_after_mint(wallet3: Wallet):
     await reset_wallet_db(wallet3)
-    invoice = await wallet3.request_mint(64)
-    pay_if_regtest(invoice.bolt11)
-    await wallet3.mint(64, id=invoice.id)
+    mint_quote = await wallet3.request_mint(64)
+    await pay_if_regtest(mint_quote.request)
+    await wallet3.mint(64, quote_id=mint_quote.quote)
     assert wallet3.balance == 64
     await reset_wallet_db(wallet3)
     await wallet3.load_proofs()
     wallet3.proofs = []
     assert wallet3.balance == 0
-    await wallet3.restore_promises_from_to(0, 20)
+    await wallet3.restore_promises_from_to(wallet3.keyset_id, 0, 20)
     assert wallet3.balance == 64
 
     # expect that DLEQ proofs are restored
@@ -185,19 +185,19 @@ async def test_restore_wallet_with_invalid_mnemonic(wallet3: Wallet):
 
 
 @pytest.mark.asyncio
-async def test_restore_wallet_after_split_to_send(wallet3: Wallet):
+async def test_restore_wallet_after_swap_to_send(wallet3: Wallet):
     await wallet3._init_private_key(
         "half depart obvious quality work element tank gorilla view sugar picture"
         " humble"
     )
     await reset_wallet_db(wallet3)
 
-    invoice = await wallet3.request_mint(64)
-    pay_if_regtest(invoice.bolt11)
-    await wallet3.mint(64, id=invoice.id)
+    mint_quote = await wallet3.request_mint(64)
+    await pay_if_regtest(mint_quote.request)
+    await wallet3.mint(64, quote_id=mint_quote.quote)
     assert wallet3.balance == 64
 
-    _, spendable_proofs = await wallet3.split_to_send(
+    _, spendable_proofs = await wallet3.swap_to_send(
         wallet3.proofs, 32, set_reserved=True
     )  # type: ignore
 
@@ -205,7 +205,7 @@ async def test_restore_wallet_after_split_to_send(wallet3: Wallet):
     await wallet3.load_proofs()
     wallet3.proofs = []
     assert wallet3.balance == 0
-    await wallet3.restore_promises_from_to(0, 100)
+    await wallet3.restore_promises_from_to(wallet3.keyset_id, 0, 100)
     assert wallet3.balance == 96
     await wallet3.invalidate(wallet3.proofs, check_spendable=True)
     assert wallet3.balance == 64
@@ -217,12 +217,12 @@ async def test_restore_wallet_after_send_and_receive(wallet3: Wallet, wallet2: W
         "hello rug want adapt talent together lunar method bean expose beef position"
     )
     await reset_wallet_db(wallet3)
-    invoice = await wallet3.request_mint(64)
-    pay_if_regtest(invoice.bolt11)
-    await wallet3.mint(64, id=invoice.id)
+    mint_quote = await wallet3.request_mint(64)
+    await pay_if_regtest(mint_quote.request)
+    await wallet3.mint(64, quote_id=mint_quote.quote)
     assert wallet3.balance == 64
 
-    _, spendable_proofs = await wallet3.split_to_send(
+    _, spendable_proofs = await wallet3.swap_to_send(
         wallet3.proofs, 32, set_reserved=True
     )  # type: ignore
 
@@ -232,7 +232,7 @@ async def test_restore_wallet_after_send_and_receive(wallet3: Wallet, wallet2: W
     await wallet3.load_proofs(reload=True)
     assert wallet3.proofs == []
     assert wallet3.balance == 0
-    await wallet3.restore_promises_from_to(0, 100)
+    await wallet3.restore_promises_from_to(wallet3.keyset_id, 0, 100)
     assert wallet3.balance == 96
     await wallet3.invalidate(wallet3.proofs, check_spendable=True)
     assert wallet3.balance == 32
@@ -260,12 +260,12 @@ async def test_restore_wallet_after_send_and_self_receive(wallet3: Wallet):
     )
     await reset_wallet_db(wallet3)
 
-    invoice = await wallet3.request_mint(64)
-    pay_if_regtest(invoice.bolt11)
-    await wallet3.mint(64, id=invoice.id)
+    mint_quote = await wallet3.request_mint(64)
+    await pay_if_regtest(mint_quote.request)
+    await wallet3.mint(64, quote_id=mint_quote.quote)
     assert wallet3.balance == 64
 
-    _, spendable_proofs = await wallet3.split_to_send(
+    _, spendable_proofs = await wallet3.swap_to_send(
         wallet3.proofs, 32, set_reserved=True
     )  # type: ignore
 
@@ -275,7 +275,7 @@ async def test_restore_wallet_after_send_and_self_receive(wallet3: Wallet):
     await wallet3.load_proofs(reload=True)
     assert wallet3.proofs == []
     assert wallet3.balance == 0
-    await wallet3.restore_promises_from_to(0, 100)
+    await wallet3.restore_promises_from_to(wallet3.keyset_id, 0, 100)
     assert wallet3.balance == 128
     await wallet3.invalidate(wallet3.proofs, check_spendable=True)
     assert wallet3.balance == 64
@@ -289,13 +289,13 @@ async def test_restore_wallet_after_send_twice(
     wallet3.private_key = PrivateKey()
     await reset_wallet_db(wallet3)
 
-    invoice = await wallet3.request_mint(2)
-    pay_if_regtest(invoice.bolt11)
-    await wallet3.mint(2, id=invoice.id)
+    mint_quote = await wallet3.request_mint(2)
+    await pay_if_regtest(mint_quote.request)
+    await wallet3.mint(2, quote_id=mint_quote.quote)
     box.add(wallet3.proofs)
     assert wallet3.balance == 2
 
-    keep_proofs, spendable_proofs = await wallet3.split_to_send(
+    keep_proofs, spendable_proofs = await wallet3.swap_to_send(
         wallet3.proofs, 1, set_reserved=True
     )  # type: ignore
     box.add(wallet3.proofs)
@@ -309,7 +309,7 @@ async def test_restore_wallet_after_send_twice(
     await wallet3.load_proofs(reload=True)
     assert wallet3.proofs == []
     assert wallet3.balance == 0
-    await wallet3.restore_promises_from_to(0, 10)
+    await wallet3.restore_promises_from_to(wallet3.keyset_id, 0, 10)
     box.add(wallet3.proofs)
     assert wallet3.balance == 4
     await wallet3.invalidate(wallet3.proofs, check_spendable=True)
@@ -317,7 +317,7 @@ async def test_restore_wallet_after_send_twice(
 
     # again
 
-    _, spendable_proofs = await wallet3.split_to_send(
+    _, spendable_proofs = await wallet3.swap_to_send(
         wallet3.proofs, 1, set_reserved=True
     )  # type: ignore
     box.add(wallet3.proofs)
@@ -331,7 +331,7 @@ async def test_restore_wallet_after_send_twice(
     await wallet3.load_proofs(reload=True)
     assert wallet3.proofs == []
     assert wallet3.balance == 0
-    await wallet3.restore_promises_from_to(0, 15)
+    await wallet3.restore_promises_from_to(wallet3.keyset_id, 0, 15)
     box.add(wallet3.proofs)
     assert wallet3.balance == 6
     await wallet3.invalidate(wallet3.proofs, check_spendable=True)
@@ -348,13 +348,13 @@ async def test_restore_wallet_after_send_and_self_receive_nonquadratic_value(
     )
     await reset_wallet_db(wallet3)
 
-    invoice = await wallet3.request_mint(64)
-    pay_if_regtest(invoice.bolt11)
-    await wallet3.mint(64, id=invoice.id)
+    mint_quote = await wallet3.request_mint(64)
+    await pay_if_regtest(mint_quote.request)
+    await wallet3.mint(64, quote_id=mint_quote.quote)
     box.add(wallet3.proofs)
     assert wallet3.balance == 64
 
-    keep_proofs, spendable_proofs = await wallet3.split_to_send(
+    keep_proofs, spendable_proofs = await wallet3.swap_to_send(
         wallet3.proofs, 10, set_reserved=True
     )  # type: ignore
     box.add(wallet3.proofs)
@@ -368,7 +368,7 @@ async def test_restore_wallet_after_send_and_self_receive_nonquadratic_value(
     await wallet3.load_proofs(reload=True)
     assert wallet3.proofs == []
     assert wallet3.balance == 0
-    await wallet3.restore_promises_from_to(0, 20)
+    await wallet3.restore_promises_from_to(wallet3.keyset_id, 0, 20)
     box.add(wallet3.proofs)
     assert wallet3.balance == 84
     await wallet3.invalidate(wallet3.proofs, check_spendable=True)
@@ -376,7 +376,7 @@ async def test_restore_wallet_after_send_and_self_receive_nonquadratic_value(
 
     # again
 
-    _, spendable_proofs = await wallet3.split_to_send(
+    _, spendable_proofs = await wallet3.swap_to_send(
         wallet3.proofs, 12, set_reserved=True
     )  # type: ignore
 
@@ -388,7 +388,7 @@ async def test_restore_wallet_after_send_and_self_receive_nonquadratic_value(
     await wallet3.load_proofs(reload=True)
     assert wallet3.proofs == []
     assert wallet3.balance == 0
-    await wallet3.restore_promises_from_to(0, 50)
+    await wallet3.restore_promises_from_to(wallet3.keyset_id, 0, 50)
     assert wallet3.balance == 108
     await wallet3.invalidate(wallet3.proofs, check_spendable=True)
     assert wallet3.balance == 64
